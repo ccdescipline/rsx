@@ -209,6 +209,9 @@ bool ExportWrapAsset(CAsset* const asset, const int setting)
     {
     case VPKFileType_e::UNKNOWN:
     case VPKFileType_e::TEXT:
+#if !HAS_BSP_SUPPORT
+    case VPKFileType_e::BSP:
+#endif
     {
         StreamIO wrapOut;
 
