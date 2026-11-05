@@ -56,6 +56,91 @@ static void CLI_HandleAssetTypeWhitelist(const CCommandLine* const cli)
 
 }
 
+// Lowercase and drop everything but letters/digits, so "stl_respawn_physics" matches "STL (Respawn Physics)".
+static std::string CLI_NormalizeFormatName(const char* const name)
+{
+    std::string out;
+    for (const char* c = name; *c; ++c)
+    {
+        if (isalnum(static_cast<unsigned char>(*c)))
+            out += static_cast<char>(tolower(static_cast<unsigned char>(*c)));
+    }
+    return out;
+}
+
+// nogui never reads imgui.ini, so each type exports with its default format (mdl_ = CAST).
+// --exportformat "mdl_=stl_respawn_physics,txtr=1" picks a format by name or by index.
+static void CLI_HandleExportFormat(const CCommandLine* const cli)
+{
+    if (!cli || !IS_NOGUI(cli))
+        return;
+
+    const char* const formatString = cli->GetParamValue("--exportformat");
+    if (!formatString)
+        return;
+
+    std::istringstream ss;
+    ss.str(formatString);
+
+    for (std::string entry; std::getline(ss, entry, ',');)
+    {
+        const size_t eq = entry.find('=');
+        if (eq == std::string::npos || eq == 0 || eq > 4 || eq + 1 >= entry.length())
+        {
+            printf("EXPORT: Ignoring --exportformat entry \"%s\" (expected <type>=<format>)\n", entry.c_str());
+            continue;
+        }
+
+        const std::string typeStr = entry.substr(0, eq);
+        const std::string formatStr = entry.substr(eq + 1);
+
+        const uint32_t fourCC = MAKEFOURCC(typeStr[0],
+            typeStr.length() >= 2 ? typeStr[1] : '\0',
+            typeStr.length() >= 3 ? typeStr[2] : '\0',
+            typeStr.length() >= 4 ? typeStr[3] : '\0');
+
+        const auto it = g_assetData.m_assetTypeBindings.find(fourCC);
+        if (it == g_assetData.m_assetTypeBindings.end() || !it->second.e.exportSettingArr || it->second.e.exportSettingArrSize == 0)
+        {
+            printf("EXPORT: --exportformat type \"%s\" has no selectable formats\n", typeStr.c_str());
+            continue;
+        }
+
+        AssetTypeBinding_t& binding = it->second;
+        const std::string wanted = CLI_NormalizeFormatName(formatStr.c_str());
+
+        int setting = -1;
+        for (size_t i = 0; i < binding.e.exportSettingArrSize; ++i)
+        {
+            if (CLI_NormalizeFormatName(binding.e.exportSettingArr[i]) == wanted)
+            {
+                setting = static_cast<int>(i);
+                break;
+            }
+        }
+
+        if (setting < 0)
+        {
+            char* end = nullptr;
+            const long idx = strtol(formatStr.c_str(), &end, 10);
+            if (end && *end == '\0' && idx >= 0 && static_cast<size_t>(idx) < binding.e.exportSettingArrSize)
+                setting = static_cast<int>(idx);
+        }
+
+        if (setting < 0)
+        {
+            printf("EXPORT: Unknown --exportformat \"%s\" for \"%s\". Valid:", formatStr.c_str(), typeStr.c_str());
+            for (size_t i = 0; i < binding.e.exportSettingArrSize; ++i)
+                printf(" %lld=\"%s\"", static_cast<long long>(i), binding.e.exportSettingArr[i]);
+            printf("\n");
+            continue;
+        }
+
+        binding.e.exportSetting = setting;
+        printf("EXPORT: \"%s\" export format set to %d (\"%s\")\n", typeStr.c_str(), setting, binding.e.exportSettingArr[setting]);
+    }
+}
+
 static void HandleFileLoad(const std::vector<std::string>& filePaths, HandleFileLoadCallback_t cb = nullptr, const CCommandLine* const cli = nullptr)
 {
     PathExtensionArray_t pathsByExtension;
@@ -77,6 +162,7 @@ static void HandleFileLoad(const std::vector<std::string>& filePaths, HandleFile
     }
 
     CLI_HandleAssetTypeWhitelist(cli);
+    CLI_HandleExportFormat(cli);
 
     g_assetData.m_validate = cli && cli->HasParam("-validate");
     g_assetData.m_validateAssetLoading = cli && cli->HasParam("-validateload");
