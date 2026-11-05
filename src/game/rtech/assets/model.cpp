@@ -703,6 +703,38 @@ static bool ExportPhysicsModelPhy(const ModelAsset* const modelAsset, std::files
 }
 
 template <typename mstudiocollmodel_t, typename mstudiocollheader_t>
+static void AddPhysicsModelBVHPart(CollisionModel_t& outModel, const mstudiocollmodel_t* const collModel, const int partIndex)
+{
+    const mstudiocollheader_t& collHeader = reinterpret_cast<const mstudiocollheader_t*>(collModel + 1)[partIndex];
+    const uint32_t* maskData = reinterpret_cast<const uint32_t*>((reinterpret_cast<const char*>(collModel) + collModel->contentMasksIndex));
+
+    const void* bvhNodes = reinterpret_cast<const char*>(collModel) + collHeader.bvhNodeIndex;
+    const void* vertData = reinterpret_cast<const char*>(collModel) + collHeader.vertIndex;
+    const void* leafData = reinterpret_cast<const char*>(collModel) + collHeader.bvhLeafIndex;
+
+    BVHModel_t data;
+
+    data.nodes = reinterpret_cast<const dbvhnode_t*>(bvhNodes);
+    data.verts = reinterpret_cast<const Vector*>(vertData);
+    data.packedVerts = reinterpret_cast<const PackedVector*>(vertData);
+    data.leafs = reinterpret_cast<const char*>(leafData);
+    data.masks = reinterpret_cast<const uint32_t*>(maskData);
+    data.origin = reinterpret_cast<const Vector*>(&collHeader.origin);
+    data.scale = collHeader.scale;
+    data.maskFilter = g_rsxSettings.exportPhysicsContentsFilter;
+    data.filterExclusive = g_rsxSettings.exportPhysicsFilterExclusive;
+    data.filterAND = g_rsxSettings.exportPhysicsFilterAND;
+
+    const dbvhnode_t* startNode = reinterpret_cast<const dbvhnode_t*>(bvhNodes);
+    const uint32_t contents = maskData[startNode->cmIndex];
+
+    Coll_HandleNodeChildType(outModel, contents, 0, startNode->child0Type, startNode->index0, &data);
+    Coll_HandleNodeChildType(outModel, contents, 0, startNode->child1Type, startNode->index1, &data);
+    Coll_HandleNodeChildType(outModel, contents, 0, startNode->child2Type, startNode->index2, &data);
+    Coll_HandleNodeChildType(outModel, contents, 0, startNode->child3Type, startNode->index3, &data);
+}
+
+template <typename mstudiocollmodel_t, typename mstudiocollheader_t>
 static bool ExportPhysicsModelBVH(const ModelAsset* const modelAsset, std::filesystem::path& exportPath)
 {
     const ModelParsedData_t* const parsedData = modelAsset->GetParsedData();
@@ -710,10 +742,7 @@ static bool ExportPhysicsModelBVH(const ModelAsset* const modelAsset, std::files
     if (parsedData->bvhData == nullptr)
         return false;
 
-    CollisionModel_t outModel;
-
     const mstudiocollmodel_t* collModel = reinterpret_cast<const mstudiocollmodel_t*>(parsedData->bvhData);
-    const mstudiocollheader_t* collHeaders = reinterpret_cast<const mstudiocollheader_t*>(collModel + 1);
 
     const int headerCount = collModel->headerCount;
 
@@ -722,43 +751,53 @@ static bool ExportPhysicsModelBVH(const ModelAsset* const modelAsset, std::files
     if (headerCount == 0x3F8000)
         return false;
 
-    const uint32_t* maskData = reinterpret_cast<const uint32_t*>((reinterpret_cast<const char*>(collModel) + collModel->contentMasksIndex));
+    // The studio header maps each collision detail level to one part (bvh header). The game traces
+    // a static prop against only one of them (map bvh leaf with the high bit set -> detail 1, else detail 0),
+    // so merging every part gives a mesh wider than either. Export detail 0 as <model>.stl and detail 1 as
+    // <model>_d1.stl when it is a different part.
+    const int detailPart[2] = { parsedData->bvhDetailPart[0], parsedData->bvhDetailPart[1] };
+    const bool hasDetailParts = detailPart[0] < headerCount && detailPart[1] < headerCount && (detailPart[0] >= 0 || detailPart[1] >= 0);
 
-    for (int i = 0; i < headerCount; i++)
+    if (!hasDetailParts)
     {
-        const mstudiocollheader_t& collHeader = collHeaders[i];
+        // header version doesn't store the detail parts (or they are out of range): keep the old behaviour of merging every part.
+        CollisionModel_t outModel;
 
-        const void* bvhNodes = reinterpret_cast<const char*>(collModel) + collHeader.bvhNodeIndex;
-        const void* vertData = reinterpret_cast<const char*>(collModel) + collHeader.vertIndex;
-        const void* leafData = reinterpret_cast<const char*>(collModel) + collHeader.bvhLeafIndex;
+        for (int i = 0; i < headerCount; i++)
+            AddPhysicsModelBVHPart<mstudiocollmodel_t, mstudiocollheader_t>(outModel, collModel, i);
 
-        BVHModel_t data;
+        if (!outModel.tris.size() && !outModel.quads.size())
+            return false;
 
-        data.nodes = reinterpret_cast<const dbvhnode_t*>(bvhNodes);
-        data.verts = reinterpret_cast<const Vector*>(vertData);
-        data.packedVerts = reinterpret_cast<const PackedVector*>(vertData);
-        data.leafs = reinterpret_cast<const char*>(leafData);
-        data.masks = reinterpret_cast<const uint32_t*>(maskData);
-        data.origin = reinterpret_cast<const Vector*>(&collHeader.origin);
-        data.scale = collHeader.scale;
-        data.maskFilter = g_rsxSettings.exportPhysicsContentsFilter;
-        data.filterExclusive = g_rsxSettings.exportPhysicsFilterExclusive;
-        data.filterAND = g_rsxSettings.exportPhysicsFilterAND;
-
-        const dbvhnode_t* startNode = reinterpret_cast<const dbvhnode_t*>(bvhNodes);
-        const uint32_t contents = maskData[startNode->cmIndex];
-
-        Coll_HandleNodeChildType(outModel, contents, 0, startNode->child0Type, startNode->index0, &data);
-        Coll_HandleNodeChildType(outModel, contents, 0, startNode->child1Type, startNode->index1, &data);
-        Coll_HandleNodeChildType(outModel, contents, 0, startNode->child2Type, startNode->index2, &data);
-        Coll_HandleNodeChildType(outModel, contents, 0, startNode->child3Type, startNode->index3, &data);
+        outModel.exportSTL(exportPath.replace_extension(".stl"));
+        return true;
     }
 
-    if (!outModel.tris.size() && !outModel.quads.size())
-        return false;
+    if (headerCount > 2 || (headerCount == 2 && detailPart[0] == detailPart[1]))
+        Log("MDL: \"%s\" has %i collision parts, only exporting detail parts %i/%i\n", modelAsset->name, headerCount, detailPart[0], detailPart[1]);
 
-    outModel.exportSTL(exportPath.replace_extension(".stl"));
-    return true;
+    const std::string modelStem(exportPath.stem().string());
+    bool exported = false;
+
+    for (int detail = 0; detail < 2; detail++)
+    {
+        const int part = detailPart[detail];
+
+        if (part < 0 || (detail > 0 && part == detailPart[0]))
+            continue;
+
+        CollisionModel_t outModel;
+        AddPhysicsModelBVHPart<mstudiocollmodel_t, mstudiocollheader_t>(outModel, collModel, part);
+
+        if (!outModel.tris.size() && !outModel.quads.size())
+            continue;
+
+        exportPath.replace_filename(detail == 0 ? std::format("{}.stl", modelStem) : std::format("{}_d{}.stl", modelStem, detail));
+        outModel.exportSTL(exportPath);
+        exported = true;
+    }
+
+    return exported;
 }
 
 static bool ExportModelHitboxes(const ModelAsset* modelAsset, std::filesystem::path& exportPath)

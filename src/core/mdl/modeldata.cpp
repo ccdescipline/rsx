@@ -1015,6 +1015,8 @@ ModelParsedData_t::ModelParsedData_t(const r5::studiohdr_v16_t* const pHdr, cons
 	if (pHdr->bvhOffset)
 	{
 		bvhData = reinterpret_cast<const char* const>(pHdr) + FIX_OFFSET(pHdr->bvhOffset);
+		bvhDetailPart[0] = static_cast<int8_t>(pHdr->bvhUnk[0]);
+		bvhDetailPart[1] = static_cast<int8_t>(pHdr->bvhUnk[1]);
 	}
 };
 
@@ -1091,6 +1093,8 @@ ModelParsedData_t::ModelParsedData_t(const r5::studiohdr_v17_t* const pHdr, cons
 	if (pHdr->bvhOffset)
 	{
 		bvhData = reinterpret_cast<const char* const>(pHdr) + FIX_OFFSET(pHdr->bvhOffset);
+		bvhDetailPart[0] = static_cast<int8_t>(pHdr->bvhUnk[0]);
+		bvhDetailPart[1] = static_cast<int8_t>(pHdr->bvhUnk[1]);
 	}
 };
 
@@ -1167,6 +1171,8 @@ ModelParsedData_t::ModelParsedData_t(const r5::studiohdr_v19_2_t* const pHdr, co
 	if (pHdr->bvhOffset)
 	{
 		bvhData = reinterpret_cast<const char* const>(pHdr) + FIX_OFFSET(pHdr->bvhOffset);
+		bvhDetailPart[0] = static_cast<int8_t>(pHdr->bvhUnk[0]);
+		bvhDetailPart[1] = static_cast<int8_t>(pHdr->bvhUnk[1]);
 	}
 };
 

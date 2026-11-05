@@ -1053,6 +1053,7 @@ public:
 	size_t hwDataSize;
 
 	const void* bvhData;
+	int8_t bvhDetailPart[2] = { -1, -1 }; // collision part (bvh header index) used per collision detail level, -1 if absent or not stored in this header version
 
 	CRamen meshVertexData;
 
