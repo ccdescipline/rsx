@@ -1,5 +1,16 @@
 #pragma once
 
+enum AudioExportSetting_e : int
+{
+	SOURCE_WAV,
+	SOURCE_OPUS
+};
+
+static const char* s_AudioExportSettingNames[] =
+{
+	"WAVE",
+	"Opus"
+};
 
 // r2
 struct MilesSource_v13_t
@@ -155,6 +166,11 @@ struct MilesSource_t
 		languageIdx(a->languageIdx), patchIdx(a->patchIdx), bpm(a->bpm), sampleRate(a->sampleRate)
 	{
 	};
+
+	~MilesSource_t()
+	{
+		audioMarkers.clear();
+	}
 
 	uint64_t nameOffset;
 	uint64_t streamDataOffset;

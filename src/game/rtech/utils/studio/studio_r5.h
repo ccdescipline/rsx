@@ -141,7 +141,7 @@ namespace r5
 	struct mstudiobone_v8_t
 	{
 		int sznameindex;
-		inline char* const pszName() const { return ((char*)this + sznameindex); }
+		inline const char* const pszName() const { return ((char*)this + sznameindex); }
 
 		int parent; // parent bone
 		int bonecontroller[6]; // bone controller index, -1 == none
@@ -158,6 +158,8 @@ namespace r5
 		int flags;
 		int proctype;
 		int procindex; // procedural rule offset
+		inline const void* const pProcedure() const { return procindex ? reinterpret_cast<const char* const>(this) + procindex : nullptr; }
+
 		int physicsbone; // index into physically simulated bone
 		// from what I can tell this is the section that is parented to this bone, and if this bone is not the parent of any sections, it goes up the bone chain to the nearest bone that does and uses that section index
 		int surfacepropidx; // index into string tablefor property name
@@ -395,19 +397,20 @@ namespace r5
 	};
 
 	// from release to season 29
-	#define ANIM_BONEFLAG_BITS_4			4 // a nibble even
-	#define ANIM_BONEFLAG_SIZE_4(count)		(IALIGN2((ANIM_BONEFLAG_BITS_4 * count + 7) / 8)) // size in bytes of the bone flag array. pads 7 bits for truncation, then align to 2 bytes
-	#define ANIM_BONEFLAG_SHIFT_4(idx)		(ANIM_BONEFLAG_BITS_4 * (idx % 2)) // return four (bits) if this index is odd, as there are four bits per bone
-	#define ANIM_BONEFLAGS_FLAG_4(ptr, idx)	(static_cast<uint8_t>(ptr[idx / 2] >> ANIM_BONEFLAG_SHIFT_4(idx)) & r5::RleBoneFlags_t::STUDIO_ANIM_MASK_RELEASE) // get byte offset, then shift if needed, mask to four bits
+	#define ANIM_BONEFLAG_BITS_4            4 // a nibble even
+	#define ANIM_BONEFLAG_SIZE_4(count)        (IALIGN2((ANIM_BONEFLAG_BITS_4 * count + 7) / 8)) // size in bytes of the bone flag array. pads 7 bits for truncation, then align to 2 bytes
+	#define ANIM_BONEFLAG_SHIFT_4(idx)        (ANIM_BONEFLAG_BITS_4 * (idx % 2)) // return four (bits) if this index is odd, as there are four bits per bone
+	#define ANIM_BONEFLAG_FLAG_4(ptr, idx)    (static_cast<uint8_t>(ptr[idx / 2] >> ANIM_BONEFLAG_SHIFT_4(idx)) & r5::RleBoneFlags_t::STUDIO_ANIM_MASK_RELEASE) // get byte offset, then shift if needed, mask to four bits
 
 	// starting in season 30 we have six bits for bone flags
-	#define ANIM_BONEFLAG_BITS_6			6 // a morsel ?
-	#define ANIM_BONEFLAG_SIZE_6(count)		(IALIGN2((ANIM_BONEFLAG_BITS_6 * count + 7) / 8))	// size in bytes of the bone flag array. pads 7 bits for truncation, then align to 2 bytes !!! TBD if this works the same !!!
-	#define ANIM_BONEFLAG_SHIFT_6(idx)		(ANIM_BONEFLAG_BITS_6 * (idx % 4))					// return four (bits) if this index is odd, as there are four bits per bone
-	#define ANIM_BONEFLAGS_FLAG_6(ptr, idx)	(static_cast<uint8_t>(*reinterpret_cast<const uint32_t* const>(ptr + ((idx / 4) * 3)) >> ANIM_BONEFLAG_SHIFT_6(idx)) & r5::RleBoneFlags_t::STUDIO_ANIM_MASK_RETAIL) // get byte offset, then shift if needed, mask to four bits
+	#define ANIM_BONEFLAG_BITS_6            6 // a morsel ?
+	#define ANIM_BONEFLAG_SIZE_6(count)        (IALIGN2((ANIM_BONEFLAG_BITS_6 * count + 7) / 8))    // size in bytes of the bone flag array. pads 7 bits for truncation, then align to 2 bytes !!! TBD if this works the same !!!
+	#define ANIM_BONEFLAG_SHIFT_6(idx)        (ANIM_BONEFLAG_BITS_6 * (idx % 4))                    // return four (bits) if this index is odd, as there are four bits per bone
+	//#define ANIM_BONEFLAGS_FLAG_6(ptr, idx)    (static_cast<uint8_t>(*reinterpret_cast<const uint32_t* const>(ptr + ((idx / 4) * 3)) >> ANIM_BONEFLAG_SHIFT_6(idx)) & r5::RleBoneFlags_t::STUDIO_ANIM_MASK_RETAIL) // get byte offset, then shift if needed, mask to four bits
+	#define ANIM_BONEFLAG_FLAG_6(ptr, idx, bits, mask)    (((static_cast<uint8_t>(ptr[bits >> 3]) | (static_cast<uint8_t>(ptr[(bits >> 3) + 1]) << 8)) >> (bits & 7)) & mask) // get byte offset, then shift if needed, mask to four bits
 
 	#define ANIM_BONEFLAG_SIZE(count, width) (width == ANIM_BONEFLAG_BITS_6 ? ANIM_BONEFLAG_SIZE_6(count) : ANIM_BONEFLAG_SIZE_4(count)) 
-	#define ANIM_BONEFLAGS_FLAG(ptr, idx, width) (width == ANIM_BONEFLAG_BITS_6 ? ANIM_BONEFLAGS_FLAG_6(ptr, idx) : ANIM_BONEFLAGS_FLAG_4(ptr, idx)) 
+	#define ANIM_BONEFLAG_FLAG(ptr, idx, width, bits) (width == ANIM_BONEFLAG_BITS_6 ? ANIM_BONEFLAG_FLAG_6(ptr, idx, bits, r5::RleBoneFlags_t::STUDIO_ANIM_MASK_RETAIL) : ANIM_BONEFLAG_FLAG_4(ptr, idx)) 
 
 	struct mstudio_rle_anim_t
 	{
@@ -792,7 +795,7 @@ namespace r5
 	struct mstudiotexture_v8_t
 	{
 		int sznameindex;
-		inline char* const pszName() const { return ((char*)this + sznameindex); }
+		inline const char* const pszName() const { return ((char*)this + sznameindex); }
 
 		uint64_t texture; // guid/hash of this material
 	};
@@ -809,7 +812,7 @@ namespace r5
 		int version; // Format version number, such as 54 (0x36,0x00,0x00,0x00)
 		int checksum; // This has to be the same in the phy and vtx files to load!
 		int sznameindex; // This has been moved from studiohdr2 to the front of the main header.
-		inline char* const pszName() const { return ((char*)this + sznameindex); }
+		inline const char* const pszName() const { return ((char*)this + sznameindex); }
 		char name[64]; // The internal name of the model, padding with null chars.
 		int length; // Data size of MDL file in chars.
 
@@ -901,9 +904,11 @@ namespace r5
 		int localposeparamindex;
 
 		int surfacepropindex;
+		inline const char* const pszSurfaceProp() const { return reinterpret_cast<const char* const>(this) + surfacepropindex; }
 
 		int keyvalueindex;
 		int keyvaluesize;
+		inline const char* const KeyValueText() const { return reinterpret_cast<const char* const>(this) + keyvalueindex; }
 
 		int numlocalikautoplaylocks;
 		int localikautoplaylockindex;
@@ -960,6 +965,7 @@ namespace r5
 
 		int numsrcbonetransform;
 		int srcbonetransformindex;
+		const mstudiosrcbonetransform_t* const SrcBoneTransform(int i) const { return reinterpret_cast<const mstudiosrcbonetransform_t* const>((char*)this + srcbonetransformindex) + i; }
 
 		int	illumpositionattachmentindex;
 
@@ -1039,6 +1045,11 @@ namespace r5
 	void CalcBonePosition_DP(int sectionlength, const uint8_t** panimtrack, float fFrame, Vector& pos);
 	void CalcBonePositionVirtual_DP(const int sectionlength, const uint8_t** panimtrack, const float fFrame, Vector& pos);
 	void CalcBoneScale_DP(const int sectionlength, const uint8_t** panimtrack, const float fFrame, Vector& scale);
+	// new 'optimized' style, appears in more recent builds. subject to change and cannot be tested currently, datapoint anims are not shipping. TODO: check out that weird flag once they start shipping again!
+	void CalcBoneQuaternion_DP(const bool useFlagTmp, const int sectionlength, const uint8_t** panimtrack, float fFrame, Quaternion& q);
+	void CalcBonePosition_DP(const bool useFlagTmp, const int sectionlength, const uint8_t** panimtrack, float fFrame, Vector& pos);
+	void CalcBonePositionVirtual_DP(const bool useFlagTmp, const int sectionlength, const uint8_t** panimtrack, const float fFrame, Vector& pos);
+	void CalcBoneScale_DP(const bool useFlagTmp, const int sectionlength, const uint8_t** panimtrack, const float fFrame, Vector& scale);
 
 	template<class PackedType>
 	__forceinline void CalcBoneSeek_DP(const PackedType* const pPackedData, int& validIdx, uint32_t& remainingFrames, const uint32_t targetFrame)

@@ -1,14 +1,18 @@
 #include <pch.h>
 #include "miles.h"
+#include "source.h"
+
 #include <game/audio/wavefile.h>
 #include <game/rtech/utils/utils.h>
-#include <imgui.h>
 #include <miniaudio/miniaudio.h>
 
 #include <core/audio/audioplayer.h>
 #include <core/fonts/codicons.h>
 #include <misc/imgui_utility.h>
-#include "source.h"
+#include <imgui.h>
+
+#include <opusenc.h>
+#include <core/version.h>
 
 constexpr const char* PATH_PREFIX_ASRC = "audio";
 
@@ -44,7 +48,11 @@ struct DecodedAudioMetadata_t
 	uint32_t sampleCount;
 	uint32_t sampleRate;
 	uint16_t channelCount;
+
+	uint8_t GetValueSize() const { return decodeFormat & DECODE_FORMAT_F32 ? sizeof(float) : sizeof(uint16_t); };
 };
+
+#define READ_STREAM(buffer, size, userData) if(ReadAudioStream(buffer, size, userData) != size) break
 
 std::optional<std::vector<char>> DecodeAudioDataForSource(const std::filesystem::path& streamPath, MilesSource_t* source, DecodedAudioMetadata_t* metadataOut)
 {
@@ -130,7 +138,7 @@ std::optional<std::vector<char>> DecodeAudioDataForSource(const std::filesystem:
 	// Buffer for holding the decoded data for each decode_block call.
 	std::vector<char> radDecodedData(sampleValueSize * channels * parsedMetadata.maxSamplesPerDecode);
 
-	size_t totalFramesDecoded = 0;
+	uint32_t totalFramesDecoded = 0;
 	uint32_t minInputBufferSize = 0; // start off with 0 bytes for input buffer so we can ask the decoder what it wants
 
 	std::vector<char> stream_data;
@@ -148,7 +156,8 @@ std::optional<std::vector<char>> DecodeAudioDataForSource(const std::filesystem:
 			if (isBinkA)
 			{
 				stream_data.resize(8);
-				ReadAudioStream(stream_data.data(), 8, &userData);
+
+				READ_STREAM(stream_data.data(), 8, &userData);
 			}
 
 			ASI_get_block_size(container.data(), stream_data.data(), stream_data.size(), &bytesConsumed, &blockSize, &minInputBufferSize);
@@ -158,23 +167,28 @@ std::optional<std::vector<char>> DecodeAudioDataForSource(const std::filesystem:
 				// Fetch the smallest possible amount of data to populate the input buffer.
 				// Future decode iterations will include this minimum buffer size in their read operation
 				stream_data.resize(minInputBufferSize);
-				ReadAudioStream(stream_data.data(), stream_data.size(), &userData);
+
+				READ_STREAM(stream_data.data(), stream_data.size(), &userData);
 			}
 		}
 
-		if (!isBinkA)
-		{
-			// Make a call to the decoder to find out how much data it wants for the next decode
+		if(!isBinkA)
 			ASI_get_block_size(container.data(), stream_data.data(), stream_data.size(), &bytesConsumed, &blockSize, &minInputBufferSize);
 
-			if (blockSize == 0xFFFF)
-				break;
-		}
+		if (blockSize == 0xFFFF)
+			break;
 
 		const size_t oldSize = stream_data.size();
 		const size_t newSize = isBinkA ? blockSize : blockSize + minInputBufferSize;
+
 		stream_data.resize(newSize);
-		ReadAudioStream(stream_data.data() + oldSize, stream_data.size() - oldSize, &userData);
+
+		const size_t audioSize = stream_data.size() - oldSize;
+		const uint32_t bytesRead = ReadAudioStream(stream_data.data() + oldSize, audioSize, &userData);
+
+		// RADA does a short read here and it's fine so binka only
+		if (isBinkA && bytesRead != audioSize)
+			break;
 
 		ASI_get_block_size(container.data(), stream_data.data(), stream_data.size(), &bytesConsumed, &blockSize, &minInputBufferSize);
 
@@ -186,6 +200,9 @@ std::optional<std::vector<char>> DecodeAudioDataForSource(const std::filesystem:
 
 			ASI_decode_block(container.data(), stream_data.data(), stream_data.size(), radDecodedData.data(), radDecodedData.size(), &decodeBytesConsumed, &samplesDecoded);
 
+			if (decodeBytesConsumed == 0 && samplesDecoded == 0)
+				break;
+
 			// The decoder provides us with a non-interleaved buffer which means that
 			// each channel's data is separate out into separate locations within the decode buffer
 			// before writing to file, the data must be brought back together
@@ -193,14 +210,24 @@ std::optional<std::vector<char>> DecodeAudioDataForSource(const std::filesystem:
 			// non-interleaved: LLLLLLRRRRRR
 			// interleaved:     LRLRLRLRLRLR
 			// https://stackoverflow.com/a/17883834
-			// 
 			// This may not be valid for other decoders, as miles uses parsedMetadata.decodeFormat to identify the decoded data format
 			// and decide how to process the audio immediately after decoding
+			
+			// size of the decode output in samples. rada data is always aligned to maxSamplesPerDecode, bink is not
+			// e.g. maxSamplesPerDecode = 16, samplesDecoded = 10
+			// 
+			// rad audio: (padded to maxSamples)     || bink audio: (no padding)
+			// LLLLLLLLLLxxxxxx | RRRRRRRRRRxxxxxx   || LLLLLLLLLL | RRRRRRRRRR
+			const size_t decodeBufSizeSamples = isBinkA ? samplesDecoded : parsedMetadata.maxSamplesPerDecode;
+
+			// clamp number of samples to the expected total (the decoder can "decode" more samples than actually exist on the final block)
+			const uint32_t framesToCopy = std::min(samplesDecoded, samplesCount - totalFramesDecoded);
+
 			for (int channelIdx = 0; channelIdx < channels; ++channelIdx)
 			{
-				const char* const channelSampleBuffer = radDecodedData.data() + (sampleValueSize * channelIdx * parsedMetadata.maxSamplesPerDecode);
+				const char* const channelSampleBuffer = radDecodedData.data() + (sampleValueSize * channelIdx * decodeBufSizeSamples);
 
-				for (uint32_t sampleIdx = 0; sampleIdx < samplesDecoded; ++sampleIdx)
+				for (uint32_t sampleIdx = 0; sampleIdx < framesToCopy; ++sampleIdx)
 				{
 					// Index in the output buffer from which the channels of this sample begin
 					const size_t outputIdx = static_cast<size_t>(channels) * (sampleIdx + totalFramesDecoded);
@@ -213,7 +240,7 @@ std::optional<std::vector<char>> DecodeAudioDataForSource(const std::filesystem:
 			}
 
 			// Add number of samples decoded to the total to keep track of when we are done decoding the whole thing
-			totalFramesDecoded += samplesDecoded;
+			totalFramesDecoded += framesToCopy;
 
 			const size_t unconsumedInputBytes = stream_data.size() - decodeBytesConsumed;
 
@@ -257,78 +284,7 @@ std::optional<std::vector<char>> DecodeAudioDataForSource(const std::filesystem:
 
 	return std::move(interleavedBuffer);
 }
-
-bool ExportAudioSourceAsset(CAsset* const asset, const int setting)
-{
-	UNUSED(setting);
-
-	CMilesAudioAsset* audioAsset = static_cast<CMilesAudioAsset*>(asset);
-	CMilesAudioBank* audioBank = asset->GetContainerFile<CMilesAudioBank>();
-
-	// Create exported path + asset path.
-	std::filesystem::path exportPath = g_rsxSettings.GetExportDirectory();
-	const std::filesystem::path asrcPath(audioAsset->GetAssetName());
-
-	// truncate paths?
-	if (g_rsxSettings.exportPathsFull)
-		exportPath.append(asrcPath.parent_path().string());
-	else
-		exportPath.append(PATH_PREFIX_ASRC);
-
-	if (!CreateDirectories(exportPath))
-	{
-		assertm(false, "Failed to create asset type directory.");
-		return false;
-	}
-
-	exportPath.append(asrcPath.filename().string());
-	exportPath.replace_extension("wav");
-
-	MilesSource_t* source = reinterpret_cast<MilesSource_t*>(audioAsset->GetAssetData());
-
-	// get the bank's path and replace the filename
-	// with the stream file name that we've just put together
-	std::filesystem::path streamPath(audioBank->GetFilePath());
-	streamPath.replace_filename(audioAsset->GetContainerFileName());
-
-	DecodedAudioMetadata_t metadata;
-	auto decodedDataOpt = DecodeAudioDataForSource(streamPath, source, &metadata);
-
-	if (!decodedDataOpt.has_value())
-	{
-		Log("Failed to decode audio source.\n");
-		return false;
-	}
-
-	const std::vector<char>& decodedData = decodedDataOpt.value();
-	const uint64_t DataSize = decodedData.size();
-
-	StreamIO outFile(exportPath, eStreamIOMode::Write);
-
-	WAVEHEADER hdr;
-
-	outFile.write(hdr);
-	outFile.write(decodedData.data(), decodedData.size());
-
-	hdr.size = static_cast<long>(DataSize + 36);
-
-	hdr.fmt.formatTag = metadata.decodeFormat & DECODE_FORMAT_F32 ? 3 : WAVE_FORMAT_PCM;
-	hdr.fmt.channels = metadata.channelCount;
-	hdr.fmt.sampleRate = metadata.sampleRate;
-	hdr.fmt.blockAlign = static_cast<uint16_t>(DataSize / metadata.sampleCount);
-	hdr.fmt.bitsPerSample = static_cast<uint16_t>(((DataSize * 8) / metadata.sampleCount) / metadata.channelCount);
-
-	hdr.data.chunkSize = static_cast<long>(DataSize);
-
-	hdr.fmt.avgBytesPerSecond = hdr.fmt.blockAlign * metadata.sampleRate;
-
-	outFile.seek(0);
-	outFile.write(hdr);
-	outFile.close();
-
-
-	return true;
-}
+#undef READ_STREAM
 
 static bool AudioSource_DoInitialSetup(CAsset* const asset)
 {
@@ -355,7 +311,7 @@ static bool AudioSource_DoInitialSetup(CAsset* const asset)
 
 	g_audioPlayer.Setup(decodedDataOpt.value(),
 		metadata.sampleCount, metadata.sampleRate, static_cast<uint8_t>(metadata.channelCount),
-		metadata.decodeFormat & DECODE_FORMAT_F32 ? sizeof(float) : sizeof(uint16_t));
+		metadata.GetValueSize());
 
 	return true;
 }
@@ -407,7 +363,7 @@ void* AudioSource_Preview(CAsset* const asset, const bool firstFrameForAsset)
 	}
 
 	ImGui::SameLine();
-	ImGui::Text("%.3f", soundLengthTime);
+	ImGui::Text("%.3f/%.3f", progressTime, soundLengthTime);
 
 	if (source->bpm != 0)
 		ImGui::Text("BPM: %u", source->bpm);
@@ -440,6 +396,179 @@ void* AudioSource_Preview(CAsset* const asset, const bool firstFrameForAsset)
 	return nullptr;
 }
 
+bool ExportAudioSourceAsset(CAsset* const asset, const int setting)
+{
+	UNUSED(setting);
+
+	CMilesAudioAsset* audioAsset = static_cast<CMilesAudioAsset*>(asset);
+	CMilesAudioBank* audioBank = asset->GetContainerFile<CMilesAudioBank>();
+
+	// Create exported path + asset path.
+	std::filesystem::path exportPath = g_rsxSettings.GetExportDirectory();
+	const std::filesystem::path asrcPath(audioAsset->GetAssetName());
+
+	// truncate paths?
+	if (g_rsxSettings.exportPathsFull)
+		exportPath.append(asrcPath.parent_path().string());
+	else
+		exportPath.append(PATH_PREFIX_ASRC);
+
+	if (!CreateDirectories(exportPath))
+	{
+		assertm(false, "Failed to create asset type directory.");
+		return false;
+	}
+
+	exportPath.append(asrcPath.filename().string());
+
+	MilesSource_t* source = reinterpret_cast<MilesSource_t*>(audioAsset->GetAssetData());
+
+	// get the bank's path and replace the filename
+	// with the stream file name that we've just put together
+	std::filesystem::path streamPath(audioBank->GetFilePath());
+	streamPath.replace_filename(audioAsset->GetContainerFileName());
+
+	DecodedAudioMetadata_t metadata;
+	auto decodedDataOpt = DecodeAudioDataForSource(streamPath, source, &metadata);
+
+	if (!decodedDataOpt.has_value())
+	{
+		Log("Failed to decode audio source.\n");
+		return false;
+	}
+
+	std::vector<char>& decodedData = decodedDataOpt.value();
+	const uint64_t DataSize = decodedData.size();
+
+	if (setting == SOURCE_WAV)
+		exportPath.replace_extension("wav");
+	else if (setting == SOURCE_OPUS)
+		exportPath.replace_extension("opus");
+
+	if (setting == SOURCE_WAV)
+	{
+		StreamIO outFile(exportPath, eStreamIOMode::Write);
+		WAVEHEADER hdr;
+
+		outFile.write(hdr);
+		outFile.write(decodedData.data(), decodedData.size());
+
+		hdr.size = static_cast<long>(DataSize + 36);
+
+		hdr.fmt.formatTag = metadata.decodeFormat & DECODE_FORMAT_F32 ? 3 : WAVE_FORMAT_PCM;
+		hdr.fmt.channels = metadata.channelCount;
+		hdr.fmt.sampleRate = metadata.sampleRate;
+		hdr.fmt.blockAlign = static_cast<uint16_t>(DataSize / metadata.sampleCount);
+		hdr.fmt.bitsPerSample = static_cast<uint16_t>(((DataSize * 8) / metadata.sampleCount) / metadata.channelCount);
+
+		hdr.data.chunkSize = static_cast<long>(DataSize);
+
+		hdr.fmt.avgBytesPerSecond = hdr.fmt.blockAlign * metadata.sampleRate;
+
+		outFile.seek(0);
+		outFile.write(hdr);
+		outFile.close();
+	}
+	else
+	{
+		// wav -> vorbis
+		const std::unordered_map<uint16_t, std::vector<uint8_t>> channelRemapIndices = {
+			/* mono          */ {1, {0}},
+			/* stereo        */ {2, {0,1}},
+			/* 1-d surround  */ {3, {0,2,1}},
+			/* quad surround */ {4, {0,1,2,3}},
+			/* 5.0 surround  */ {5, {0,2,1,3,4}},
+			/* 5.1 surround  */ {6, {0,2,1,4,5,3}},
+			/* 6.1 surround  */ {7, {0,2,1,5,6,4,3}},
+			/* 7.1 surround  */ {8, {0,2,1,6,7,4,5,3}}
+		};
+
+		// mono/stereo have the same channel order in both so don't bother shuffling them
+		if (metadata.channelCount > 2 && channelRemapIndices.contains(metadata.channelCount))
+		{
+			const uint8_t valueSize = metadata.GetValueSize();
+			const size_t frameSize = static_cast<size_t>(metadata.channelCount) * valueSize;
+
+			const std::vector<uint8_t>& channelRemap = channelRemapIndices.at(metadata.channelCount);
+
+			std::vector<char> tempBufferData(frameSize);
+
+			for (size_t i = 0; i < metadata.sampleCount; ++i)
+			{
+				// buffer the current frame for swapping
+				char* const frameStart = &decodedData[i * frameSize];
+				memcpy_s(
+					tempBufferData.data(),
+					frameSize,
+					frameStart,
+					frameSize);
+
+				// start from the second channel because the first channel is always Front Left
+				for (size_t j = 1; j < metadata.channelCount; ++j)
+				{
+					memcpy_s(
+						frameStart + (j * valueSize),
+						valueSize,
+						tempBufferData.data() + (static_cast<size_t>(channelRemap[j]) * valueSize),
+						valueSize);
+				}
+			}
+		}
+
+		OggOpusComments* comments = ope_comments_create();
+		ope_comments_add(comments, "TITLE", audioAsset->GetAssetName().c_str());
+		ope_comments_add(comments, "COMMENT", "Exported by reSource Xtractor v" VERSION_STRING);
+		ope_comments_add(comments, "COPYRIGHT", "Respawn Entertainment");
+		ope_comments_add(comments, "GAME", audioBank->GetVersion() >= 13 ? "Apex Legends" : "Titanfall 2");
+
+		const bool isSurround = metadata.channelCount > 2; // family: 0 is mono/stereo, 1 is surround
+
+		int error;
+		OggOpusEnc* enc = ope_encoder_create_file(
+			exportPath.string().c_str(),
+			comments,
+			metadata.sampleRate, metadata.channelCount,
+			isSurround ? 1 : 0,
+			&error);
+
+		if (!enc)
+		{
+			Log("OPUS: Failed to create encoder for source \"%s\": %s\n", audioAsset->GetAssetName().c_str(), ope_strerror(error));
+			ope_comments_destroy(comments);
+			return false;
+		}
+
+		// haven't observed anything over 7.1 so idk how to handle them
+		// non-surround stuff is fine so no need to manually set the bitrate
+		if (isSurround && metadata.channelCount <= 8)
+		{
+			constexpr std::array<uint32_t, 6> bitrates = {
+				160000, // 3.0
+				224000, // 4.0
+				256000, // 5.0
+				320000, // 5.1
+				384000, // 6.1
+				448000  // 7.1
+			};
+
+			if (const int ret = ope_encoder_ctl(enc, OPUS_SET_BITRATE(bitrates[metadata.channelCount-3])); ret != OPE_OK)
+				Log("OPUS: Failed to set bitrate for source \"%s\": %s\n", audioAsset->GetAssetName().c_str(), ope_strerror(ret));
+		}
+
+		if (metadata.decodeFormat & DECODE_FORMAT_F32)
+			ope_encoder_write_float(enc, reinterpret_cast<const float*>(decodedData.data()), metadata.sampleCount);
+		else
+			ope_encoder_write(enc, reinterpret_cast<const int16_t*>(decodedData.data()), metadata.sampleCount);
+
+
+		ope_encoder_drain(enc);
+		ope_encoder_destroy(enc);
+		ope_comments_destroy(comments);
+	}
+
+	return true;
+}
+
 void InitAudioSourceAssetType()
 {
 	AssetTypeBinding_t type =
@@ -450,7 +579,7 @@ void InitAudioSourceAssetType()
 		.loadFunc = nullptr,
 		.postLoadFunc = nullptr,
 		.previewFunc = AudioSource_Preview,
-		.e = { ExportAudioSourceAsset, 0, nullptr, 0ull },
+		.e = { ExportAudioSourceAsset, 0, s_AudioExportSettingNames, ARRSIZE(s_AudioExportSettingNames) },
 	};
 
 	REGISTER_TYPE(type);

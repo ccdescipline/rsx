@@ -109,6 +109,27 @@
     <Filter Include="game\vpk">
       <UniqueIdentifier>{20e17b08-8fd9-421f-8a16-9e0992bf2f76}</UniqueIdentifier>
     </Filter>
+    <Filter Include="thirdparty\imgui\implot">
+      <UniqueIdentifier>{08453191-7974-4350-970f-8bf25cf445bf}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="thirdparty\rad_lzb_simple">
+      <UniqueIdentifier>{7b07f2e4-0912-4cd1-a512-7f407ac5a295}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="core\bridge">
+      <UniqueIdentifier>{ed944e90-b9d0-4ab5-9ee8-2c9e6dddf993}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="game\audio\actions">
+      <UniqueIdentifier>{2c633e37-0581-4dc3-ae10-9d6a3c934306}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="thirdparty\libopusenc">
+      <UniqueIdentifier>{e46a1e10-86c4-4950-b122-c514d5f58bb4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="thirdparty\libopusenc\include">
+      <UniqueIdentifier>{fbd83452-92dc-4427-84ac-175b3b35c888}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="thirdparty\libopusenc\src">
+      <UniqueIdentifier>{16c53d32-dbf0-4571-a765-6dbec593228f}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="pch.h">
@@ -348,9 +369,6 @@
     <ClInclude Include="game\model\sourcemodel.h">
       <Filter>game\model</Filter>
     </ClInclude>
-    <ClInclude Include="game\rtech\utils\studio\studio_generic.h">
-      <Filter>game\rtech\utils\studio</Filter>
-    </ClInclude>
     <ClInclude Include="game\rtech\utils\studio\studio_r5.h">
       <Filter>game\rtech\utils\studio</Filter>
     </ClInclude>
@@ -397,6 +415,9 @@
       <Filter>game\bluepoint</Filter>
     </ClInclude>
     <ClInclude Include="game\bsp\bsp.h">
+      <Filter>game\bsp</Filter>
+    </ClInclude>
+    <ClInclude Include="game\bsp\entities.h">
       <Filter>game\bsp</Filter>
     </ClInclude>
     <ClInclude Include="game\rtech\utils\bsp\bspflags.h">
@@ -495,13 +516,56 @@
     <ClInclude Include="game\vpk\vpk.h">
       <Filter>game\vpk</Filter>
     </ClInclude>
-    <ClInclude Include="core\bridge\bridge.h" />
-    <ClInclude Include="thirdparty\rad_lzb_simple\rad_lzb_simple.h" />
     <ClInclude Include="game\audio\source.h">
       <Filter>game\audio</Filter>
     </ClInclude>
     <ClInclude Include="game\audio\event.h">
       <Filter>game\audio</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\imgui\implot\implot_internal.h">
+      <Filter>thirdparty\imgui\implot</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\imgui\implot\implot.h">
+      <Filter>thirdparty\imgui\implot</Filter>
+    </ClInclude>
+    <ClInclude Include="game\audio\project.h">
+      <Filter>game\audio</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\rad_lzb_simple\rad_lzb_simple.h">
+      <Filter>thirdparty\rad_lzb_simple</Filter>
+    </ClInclude>
+    <ClInclude Include="core\bridge\bridge.h">
+      <Filter>core\bridge</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\libopusenc\src\config.h">
+      <Filter>thirdparty\libopusenc\src</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\libopusenc\src\arch.h">
+      <Filter>thirdparty\libopusenc\src</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\libopusenc\src\ogg_packer.h">
+      <Filter>thirdparty\libopusenc\src</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\libopusenc\src\opus_header.h">
+      <Filter>thirdparty\libopusenc\src</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\libopusenc\src\picture.h">
+      <Filter>thirdparty\libopusenc\src</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\libopusenc\src\resample_sse.h">
+      <Filter>thirdparty\libopusenc\src</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\libopusenc\src\speex_resampler.h">
+      <Filter>thirdparty\libopusenc\src</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\libopusenc\src\unicode_support.h">
+      <Filter>thirdparty\libopusenc\src</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\libopusenc\include\opusenc.h">
+      <Filter>thirdparty\libopusenc\include</Filter>
+    </ClInclude>
+    <ClInclude Include="game\bsp\bvh.h">
+      <Filter>game\bsp</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -718,9 +782,6 @@
     <ClCompile Include="game\audio\miles_bcf.cpp">
       <Filter>game\audio</Filter>
     </ClCompile>
-    <ClCompile Include="game\rtech\utils\studio\studio_generic.cpp">
-      <Filter>game\rtech\utils\studio</Filter>
-    </ClCompile>
     <ClCompile Include="game\rtech\utils\studio\studio_r5.cpp">
       <Filter>game\rtech\utils\studio</Filter>
     </ClCompile>
@@ -764,6 +825,9 @@
       <Filter>core\filehandling</Filter>
     </ClCompile>
     <ClCompile Include="game\bsp\bsp.cpp">
+      <Filter>game\bsp</Filter>
+    </ClCompile>
+    <ClCompile Include="game\bsp\entities.cpp">
       <Filter>game\bsp</Filter>
     </ClCompile>
     <ClCompile Include="game\rtech\assets\lcd_screen_effect.cpp">
@@ -841,13 +905,56 @@
     <ClCompile Include="core\filehandling\valvepak.cpp">
       <Filter>core\filehandling</Filter>
     </ClCompile>
-    <ClCompile Include="core\bridge\bridge.cpp" />
-    <ClCompile Include="thirdparty\rad_lzb_simple\rad_lzb_simple.c" />
     <ClCompile Include="game\audio\source.cpp">
       <Filter>game\audio</Filter>
     </ClCompile>
     <ClCompile Include="game\audio\event.cpp">
       <Filter>game\audio</Filter>
+    </ClCompile>
+    <ClCompile Include="game\audio\event_action.cpp">
+      <Filter>game\audio</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\imgui\implot\implot.cpp">
+      <Filter>thirdparty\imgui\implot</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\imgui\implot\implot_items.cpp">
+      <Filter>thirdparty\imgui\implot</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\imgui\implot\implot_demo.cpp">
+      <Filter>thirdparty\imgui\implot</Filter>
+    </ClCompile>
+    <ClCompile Include="game\audio\project.cpp">
+      <Filter>game\audio</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\rad_lzb_simple\rad_lzb_simple.c">
+      <Filter>thirdparty\rad_lzb_simple</Filter>
+    </ClCompile>
+    <ClCompile Include="core\bridge\bridge.cpp">
+      <Filter>core\bridge</Filter>
+    </ClCompile>
+    <ClCompile Include="game\audio\actions\action_play.cpp">
+      <Filter>game\audio\actions</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\libopusenc\src\ogg_packer.c">
+      <Filter>thirdparty\libopusenc\src</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\libopusenc\src\opus_header.c">
+      <Filter>thirdparty\libopusenc\src</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\libopusenc\src\opusenc.c">
+      <Filter>thirdparty\libopusenc\src</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\libopusenc\src\picture.c">
+      <Filter>thirdparty\libopusenc\src</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\libopusenc\src\random.c">
+      <Filter>thirdparty\libopusenc\src</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\libopusenc\src\resample.c">
+      <Filter>thirdparty\libopusenc\src</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\libopusenc\src\unicode_support.c">
+      <Filter>thirdparty\libopusenc\src</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>

@@ -1,6 +1,9 @@
 #pragma once
 #include <game/asset.h>
 
+#include "entities.h"
+#include "bvh.h"
+
 // todo
 //class CBSPFile : public CAssetContainer
 //{
@@ -77,11 +80,22 @@ struct dmesh_t
 	int flags;
 };
 
+struct dportal_t
+{
+	bool isReversed;
+	char type;
+	char numRefs;
+	char padding;
+
+	short firstRef;
+	short cell;
+	int plane;
+};
+
 class CPakAsset;
 class CDXDrawData;
 struct ID3D11ShaderResourceView;
 struct ID3D11Buffer;
-
 
 class CBSPData
 {
@@ -89,8 +103,11 @@ public:
 	CBSPData(std::string name) : 
 		m_mapName(name), m_drawData(nullptr),
 		m_vertPositionsBuffer(nullptr), m_vertNormalsBuffer(nullptr),
-		m_vertPositionsSRV(nullptr), m_vertNormalsSRV(nullptr)
+		m_vertPositionsSRV(nullptr), m_vertNormalsSRV(nullptr),
+		envEntitiesKV(), scriptEntitiesKV()
 	{};
+
+	~CBSPData();
 
 	void PopulateFromPakAsset(CPakAsset* pakAsset, void* bspData);
 
@@ -137,6 +154,7 @@ public:
 private:
 
 	void CreateOrUpdatePreviewStructuredBuffers();
+	std::unordered_map<int, uint32_t> ParseModelFlagsFromEntities() const;
 
 private:
 	std::string m_mapName;
@@ -160,4 +178,10 @@ private:
 
 	ID3D11ShaderResourceView* m_vertPositionsSRV;
 	ID3D11ShaderResourceView* m_vertNormalsSRV;
+
+	std::vector<BSPEntity_s> envEntitiesKV;
+	std::vector<BSPEntity_s> scriptEntitiesKV;
+
+	bool hasEntities_env;
+	bool hasEntities_script;
 };

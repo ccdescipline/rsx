@@ -363,8 +363,6 @@ void CDXCamera::AddRotation(float yaw, float pitch, float roll)
     if (rotation.y < (-XM_PI))
         rotation.y += 2.f * XM_PI;
 
-    rotation.x += pitch;
-
     // when this is clamped to 90 degrees, the view flips when it hits 90
     // if it's 89.5 the bug doesn't happen. i dont know how to fix it right now so i'm just going to leave it like this for now
     rotation.x = std::clamp(rotation.x + pitch, -DEG2RAD(89.5f), DEG2RAD(89.5f));
@@ -372,19 +370,19 @@ void CDXCamera::AddRotation(float yaw, float pitch, float roll)
     rotation.z += roll;
 }
 
-// first-person
-//XMMATRIX CDXCamera::GetViewMatrix()
-//{
-//    const XMMATRIX rotMatrix = XMMatrixRotationRollPitchYaw(rotation.x, rotation.y, rotation.z);
-//
-//    target = XMVector3TransformCoord(XMVectorSet(0, 0, 1, 0), rotMatrix);
-//    up = XMVector3TransformCoord(XMVectorSet(0, 1, 0, 0), rotMatrix);
-//
-//    target = position.AsXMVector() + target;
-//
-//    return XMMatrixLookAtLH(position.AsXMVector(), target, up);
-//}
+#if (PREVIEW_FIRST_PERSON)
+XMMATRIX CDXCamera::GetViewMatrix()
+{
+    const XMMATRIX rotMatrix = XMMatrixRotationRollPitchYaw(rotation.x, rotation.y, rotation.z);
 
+    target = XMVector3TransformCoord(XMVectorSet(0, 0, 1, 0), rotMatrix);
+    up = XMVector3TransformCoord(XMVectorSet(0, 1, 0, 0), rotMatrix);
+
+    target = position.AsXMVector() + target;
+
+    return XMMatrixLookAtLH(position.AsXMVector(), target, up);
+}
+#else // orbit
 XMMATRIX CDXCamera::GetViewMatrix()
 {
     Vector ttarget = { 0,0,0 };
@@ -399,6 +397,7 @@ XMMATRIX CDXCamera::GetViewMatrix()
 
     return XMMatrixLookAtLH(cameraPos, focusPos, upDir);
 }
+#endif
 
 bool CDXParentHandler::SetupAdapters()
 {
@@ -629,7 +628,7 @@ bool CDXParentHandler::CreateMainView(const uint16_t w, const uint16_t h)
         D3D11_DEPTH_STENCIL_DESC desc = {};
         desc.DepthEnable = true;
         desc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
-        desc.DepthFunc = D3D11_COMPARISON_LESS;
+        desc.DepthFunc = D3D11_COMPARISON_GREATER;
 
         if (FAILED(m_pDevice->CreateDepthStencilState(&desc, &m_pDepthStencilState)))
             assertm(false, "Failed to create depth stencil state.");
@@ -639,7 +638,7 @@ bool CDXParentHandler::CreateMainView(const uint16_t w, const uint16_t h)
         D3D11_DEPTH_STENCIL_DESC desc = {};
         desc.DepthEnable = false;
         desc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
-        desc.DepthFunc = D3D11_COMPARISON_LESS;
+        desc.DepthFunc = D3D11_COMPARISON_GREATER;
 
         if (FAILED(m_pDevice->CreateDepthStencilState(&desc, &m_pDepthStencilStateNoDepthTest)))
             assertm(false, "Failed to create non-depth stencil state.");
@@ -648,12 +647,12 @@ bool CDXParentHandler::CreateMainView(const uint16_t w, const uint16_t h)
     {
         // eventually there should be multiple sampler states that are chosen depending on material flags for model preview
         D3D11_SAMPLER_DESC desc = {};
-        desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        desc.Filter = D3D11_FILTER_ANISOTROPIC;
         desc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
         desc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
         desc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
         desc.MipLODBias = 0.f;
-        desc.MaxAnisotropy = 1;
+        desc.MaxAnisotropy = 16;
         desc.ComparisonFunc = D3D11_COMPARISON_ALWAYS;
         desc.BorderColor[0] = 0.f;
         desc.BorderColor[1] = 0.f;
@@ -747,7 +746,10 @@ bool CDXParentHandler::CreateViewForSceneWindow(const uint16_t w, const uint16_t
 
 void CDXParentHandler::UpdateProjectionMatrix()
 {
-    m_projectionMatrix = XMMatrixPerspectiveFovLH(0.25f * XM_PI, static_cast<float>(renderWidth) / renderHeight, 0.1f, g_PreviewSettings.previewCullDistance);
+    m_projectionMatrix = XMMatrixPerspectiveFovLH(
+        0.25f * XM_PI,
+        static_cast<float>(renderWidth) / renderHeight,
+        g_PreviewSettings.previewCullDistance, 0.1f);
 }
 
 bool CDXParentHandler::CreateDepthBuffer(ID3D11Texture2D* const frameBuffer, ID3D11Texture2D** depthBuffer, ID3D11DepthStencilView** depthStencilView)

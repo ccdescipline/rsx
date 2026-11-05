@@ -5,16 +5,30 @@
 #include <core/render/dx.h>
 #include <game/rtech/assets/material.h>
 #include <game/rtech/assets/texture.h>
+#include <core/render/preview/preview.h>
+#include "entities.h"
+#include <imgui.h>
+
+CBSPData::~CBSPData()
+{
+	FreeAllocVar(m_drawData);
+
+	DX_RELEASE_PTR(m_vertPositionsSRV);
+	DX_RELEASE_PTR(m_vertNormalsSRV);
+	DX_RELEASE_PTR(m_vertPositionsBuffer);
+	DX_RELEASE_PTR(m_vertNormalsBuffer);
+}
 
 extern CDXParentHandler* g_dxHandler;
 extern std::unique_ptr<char[]> GetWrapAssetData(CAsset* const asset, uint64_t* outSize);
 
-void GetShadersForVertexLump(int vertexType, CShader** vertexShaderOut, CShader** pixelShaderOut)
+static void BSP_GetVertexLumpShaders(int vertexType, CShader** vertexShaderOut, CShader** pixelShaderOut)
 {
-	CShader* vertexShader = nullptr;
-	CShader* pixelShader = nullptr;
 	D3D11_INPUT_ELEMENT_DESC* inputElements = nullptr;
 	UINT numElements = 0;
+
+	CShader* pixelShader = g_dxHandler->GetShaderManager()->LoadShaderFromString("shaders/bsp_ps", s_BSPPixelShader, eShaderType::Pixel);
+	CShader* vertexShader = nullptr;
 
 	switch (vertexType)
 	{
@@ -35,7 +49,6 @@ void GetShadersForVertexLump(int vertexType, CShader** vertexShaderOut, CShader*
 		inputElements[3] = { "UNK",      0, DXGI_FORMAT_R32_UINT,        0, D3D11_APPEND_ALIGNED_ELEMENT, D3D11_INPUT_PER_VERTEX_DATA, 0 };
 
 		vertexShader = g_dxHandler->GetShaderManager()->LoadShaderFromString("shaders/vertexLitFlat_vs", s_VertexLitFlatShader, eShaderType::Vertex, inputElements, numElements);
-		pixelShader = g_dxHandler->GetShaderManager()->LoadShaderFromString("shaders/bsp_ps", s_BSPPixelShader, eShaderType::Pixel);
 
 		break;
 	}
@@ -67,7 +80,6 @@ void GetShadersForVertexLump(int vertexType, CShader** vertexShaderOut, CShader*
 		inputElements[5] = { "UNK",       0, DXGI_FORMAT_R32_UINT,        0, D3D11_APPEND_ALIGNED_ELEMENT, D3D11_INPUT_PER_VERTEX_DATA, 0 };
 
 		vertexShader = g_dxHandler->GetShaderManager()->LoadShaderFromString("shaders/vertexLitBump_vs", s_VertexLitBumpShader, eShaderType::Vertex, inputElements, numElements);
-		pixelShader = g_dxHandler->GetShaderManager()->LoadShaderFromString("shaders/bsp_ps", s_BSPPixelShader, eShaderType::Pixel);
 
 		break;
 	}
@@ -88,7 +100,6 @@ void GetShadersForVertexLump(int vertexType, CShader** vertexShaderOut, CShader*
 		inputElements[3] = { "UNK",      0, DXGI_FORMAT_R32_UINT,        0, D3D11_APPEND_ALIGNED_ELEMENT, D3D11_INPUT_PER_VERTEX_DATA, 0 };
 
 		vertexShader = g_dxHandler->GetShaderManager()->LoadShaderFromString("shaders/vertexLitFlat_vs", s_VertexLitFlatShader, eShaderType::Vertex, inputElements, numElements);
-		pixelShader = g_dxHandler->GetShaderManager()->LoadShaderFromString("shaders/bsp_ps", s_BSPPixelShader, eShaderType::Pixel);
 
 		break;
 	}
@@ -109,7 +120,6 @@ void GetShadersForVertexLump(int vertexType, CShader** vertexShaderOut, CShader*
 		inputElements[3] = { "UNK",      0, DXGI_FORMAT_R32G32_UINT,        0, D3D11_APPEND_ALIGNED_ELEMENT, D3D11_INPUT_PER_VERTEX_DATA, 0 };
 
 		vertexShader = g_dxHandler->GetShaderManager()->LoadShaderFromString("shaders/vertexUnlitTS_vs", s_VertexUnlitTSShader, eShaderType::Vertex, inputElements, numElements);
-		pixelShader = g_dxHandler->GetShaderManager()->LoadShaderFromString("shaders/bsp_ps", s_BSPPixelShader, eShaderType::Pixel);
 
 		break;
 	}
@@ -196,8 +206,6 @@ uint8_t GetVertexLumpIdByMeshFlag(int vertexType)
 	}
 }
 
-#define CONVERT_VERT_STRIDE(originalStride) (originalStride - (2*sizeof(uint32_t))) + (2 * sizeof(float3))
-
 void CBSPData::CreateOrUpdatePreviewStructuredBuffers()
 {
 	const uint32_t vertPositionsLumpSize = GetLumpSize(LUMP_VERTEXES);
@@ -277,6 +285,15 @@ void CBSPData::CreateOrUpdatePreviewStructuredBuffers()
 	}
 }
 
+#define POPULATE_BSP_ENTS(type) \
+	if(CAsset* entAsset = g_assetData.FindAsset(std::format("maps/{}_{}.ent", m_mapName, #type))) \
+	{ \
+		std::unique_ptr<char[]> entData = GetWrapAssetData(entAsset, nullptr); \
+		std::string str(entData.get()); \
+		BSP_ParseEntities(str, type##EntitiesKV); \
+		hasEntities_##type = true; \
+	}
+
 void CBSPData::PopulateFromPakAsset(CPakAsset* pakAsset, void* bspData)
 {
 	CPakFile* pak = static_cast<CPakFile*>(pakAsset->GetContainerFile());
@@ -312,62 +329,82 @@ void CBSPData::PopulateFromPakAsset(CPakAsset* pakAsset, void* bspData)
 
 	l.numVertPositions = header->lumps[LUMP_VERTEXES].filelen / sizeof(Vector);
 	l.numVertNormals = header->lumps[LUMP_VERTNORMALS].filelen / sizeof(Vector);
+
+	POPULATE_BSP_ENTS(env);
+	POPULATE_BSP_ENTS(script);
 }
 
-void CreateDXDrawDataTransformsBuffer(CDXDrawData* drawData)
+static const std::unordered_map<std::string, int> s_classnameFlagMap = {
+	{"fog_volume", DMDD_FOGVOL},
+
+};
+
+static const std::vector<std::pair<std::string, int>> s_classnamePrefixFlags = {
+	{"trigger_", DMDD_TRIGGER},
+
+};
+
+#define ADD_MODEL_FLAG(modelIdx, val) \
+									if (flagMap.contains(modelIdx)) \
+										flagMap.at(modelIdx) |= val; \
+									else \
+										flagMap[modelIdx] = val;
+
+// fetch a map of flags for models according to any entities that reference the model
+std::unordered_map<int, uint32_t> CBSPData::ParseModelFlagsFromEntities() const
 {
-	if (!drawData->transformsBuffer)
+	std::unordered_map<int, uint32_t> flagMap;
+
+	if (hasEntities_env)
 	{
-		D3D11_BUFFER_DESC desc{};
+		for (const BSPEntity_s& ent : envEntitiesKV)
+		{
+			std::string modelVal;
+			std::string classnameVal;
+			if (ent.GetValue("model", &modelVal) && ent.GetValue("classname", &classnameVal))
+			{
+				if (modelVal[0] == '*')
+				{
+					const int modelIdx = std::stoi(modelVal.substr(1));
 
-		constexpr UINT transformsBufferSizeAligned = IALIGN(sizeof(VS_TransformConstants), 16);
+					const int flagValue = s_classnameFlagMap.contains(classnameVal) ? s_classnameFlagMap.at(classnameVal) : 0;
 
-		desc.ByteWidth = transformsBufferSizeAligned;
+					ADD_MODEL_FLAG(modelIdx, flagValue);
 
-		// make sure this buffer can be updated every frame
-		desc.Usage = D3D11_USAGE_DYNAMIC;
-		desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+					for (auto& [prefix, prefixFlagVal] : s_classnamePrefixFlags)
+					{
+						if (classnameVal.starts_with(prefix))
+						{
+							ADD_MODEL_FLAG(modelIdx, flagValue);
 
-		// const buffer
-		desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-
-		g_dxHandler->GetDevice()->CreateBuffer(&desc, NULL, &drawData->transformsBuffer);
+							// Classes will only ever have one of the registered prefixes so like...
+							break;
+						}
+					}
+				}
+			}
+		}
 	}
 
-	D3D11_MAPPED_SUBRESOURCE resource;
-	g_dxHandler->GetDeviceContext()->Map(
-		drawData->transformsBuffer, 0,
-		D3D11_MAP_WRITE_DISCARD, 0,
-		&resource
-	);
-
-	CDXCamera* const camera = g_dxHandler->GetCamera();
-	const XMMATRIX view = camera->GetViewMatrix();
-	const XMMATRIX model = XMMatrixTranslationFromVector(drawData->position.AsXMVector());
-	const XMMATRIX projection = g_dxHandler->GetProjMatrix();
-
-	VS_TransformConstants* const transforms = reinterpret_cast<VS_TransformConstants*>(resource.pData);
-	transforms->modelMatrix = XMMatrixTranspose(model);
-	transforms->viewMatrix = XMMatrixTranspose(view);
-	transforms->projectionMatrix = XMMatrixTranspose(projection);
-
-	g_dxHandler->GetDeviceContext()->Unmap(drawData->transformsBuffer, 0);
+	return flagMap;
 }
+#undef ADD_MODEL_FLAG
+
+#define CONVERT_VERT_STRIDE(originalStride) (originalStride - (2*sizeof(uint32_t))) + (2 * sizeof(float3))
 
 CDXDrawData* CBSPData::ConstructPreviewData()
 {
 	if (!m_drawData)
 	{
+		const std::unordered_map<int, uint32_t> modelFlags = ParseModelFlagsFromEntities();
+
 		m_drawData = new CDXDrawData();
 
 		m_drawData->dataType = CDXDrawData::DrawDataType_e::MODEL;
-
-		//CreateOrUpdatePreviewStructuredBuffers();
-
-		m_drawData->pixelShader = g_dxHandler->GetShaderManager()->LoadShader("shaders/bsp_ps", eShaderType::Pixel);
-		m_drawData->vertexShader = g_dxHandler->GetShaderManager()->LoadShader("shaders/bsp_vs", eShaderType::Vertex);
+		m_drawData->modelName = m_mapName;
 
 		std::map<int, ID3D11Buffer*> lumpVertexBuffers;
+		std::unordered_map<int, uint32_t> lumpVertBufferIndices;
 
 		const float3* vertexPositionsLumpData = reinterpret_cast<const float3*>(GetLumpData(LUMP_VERTEXES).get());
 		const float3* vertexNormalsLumpData = reinterpret_cast<const float3*>(GetLumpData(LUMP_VERTNORMALS).get());
@@ -416,14 +453,30 @@ CDXDrawData* CBSPData::ConstructPreviewData()
 				g_dxHandler->GetDevice(),
 				&lumpVertexBuffers[i],
 				static_cast<UINT>(numVertices * newStride),
-				D3D11_USAGE_DYNAMIC,
+				D3D11_USAGE_IMMUTABLE,
 				D3D11_BIND_VERTEX_BUFFER,
-				D3D11_CPU_ACCESS_WRITE,
+				0,
 				0, 0,
 				newVertexBuffer
 			);
 
+			lumpVertBufferIndices[i] = m_drawData->AddCommonBuffer(lumpVertexBuffers[i]);
+
 			delete[] newVertexBuffer;
+		}
+
+		// Precache the vertex lump shaders so we don't have to hit the shadermanager cache for every mesh
+		std::unordered_map<uint16_t, std::pair<CShader*, CShader*>> vertShaders =
+		{
+			{MESH_VERTEX_LIT_FLAT, {}},
+			{MESH_VERTEX_LIT_BUMP, {}},
+			{MESH_VERTEX_UNLIT, {}},
+			{MESH_VERTEX_UNLIT_TS, {}},
+		};
+
+		for (auto& [typeFlags, shaders] : vertShaders)
+		{
+			BSP_GetVertexLumpShaders(typeFlags, &shaders.first, &shaders.second);
 		}
 
 		const dmodel_t* modelLumpData = reinterpret_cast<dmodel_t*>(GetLumpData(LUMP_MODELS).get());
@@ -432,6 +485,9 @@ CDXDrawData* CBSPData::ConstructPreviewData()
 		const uint16_t* indexLumpData = reinterpret_cast<uint16_t*>(GetLumpData(LUMP_MESH_INDICES).get());
 		const dtexdata_t* texLumpData = reinterpret_cast<dtexdata_t*>(GetLumpData(LUMP_TEXDATA).get());
 		const char* texStringLumpData = reinterpret_cast<char*>(GetLumpData(LUMP_TEXDATA_STRING_DATA).get());
+
+		std::unordered_map<int, std::shared_ptr<CTexture>> meshTextureCache;
+		std::vector<int> modelIndices;
 
 		for (int i = 0; i < l.numModels; ++i)
 		{
@@ -447,21 +503,35 @@ CDXDrawData* CBSPData::ConstructPreviewData()
 				DXMeshDrawData_t meshDrawData = {};
 				meshDrawData.indexFormat = DXGI_FORMAT_R32_UINT;
 
-				meshDrawData.doFrustumCulling = true;
+				meshDrawData.doFrustumCulling = false;
 				meshDrawData.modelMins = model->mins;
 				meshDrawData.modelMaxs = model->maxs;
 				meshDrawData.visible = true;
+				meshDrawData.hasGameShaders = false;
+				meshDrawData.wireframe = false;
+				meshDrawData.usesCommonBuffers = true;
+				
+				if (modelFlags.contains(i))
+					meshDrawData.meshTypeFlags = modelFlags.at(i);
 
 				const dmaterialsort_t* mtlSort = &materialLumpData[mesh->mtlSortIdx];
 
 				CShader* meshPixelShader = nullptr;
 				CShader* meshVertexShader = nullptr;
 
-				const int meshVertType = mesh->flags & 0x600;
+				const uint16_t meshVertType = mesh->flags & 0x600;
 				const int meshVertLumpId = GetVertexLumpIdByMeshFlag(meshVertType);
 
-				GetShadersForVertexLump(meshVertType, &meshVertexShader, &meshPixelShader);
+				if (vertShaders.contains(meshVertType))
+				{
+					const auto& shaderPair = vertShaders.at(meshVertType);
 
+					meshVertexShader = shaderPair.first;
+					meshPixelShader = shaderPair.second;
+				}
+				else assert(0);
+
+				meshDrawData.buffers.vertexBufferIdx = lumpVertBufferIndices[meshVertLumpId];
 				meshDrawData.vertexShader = meshVertexShader->Get<ID3D11VertexShader>();
 				meshDrawData.pixelShader = meshPixelShader->Get<ID3D11PixelShader>();
 
@@ -474,52 +544,60 @@ CDXDrawData* CBSPData::ConstructPreviewData()
 				meshDrawData.vertexStride = CONVERT_VERT_STRIDE(originalStride);
 				meshDrawData.numIndices = mesh->triCount * 3;
 
-				uint32_t* meshIndexData = new uint32_t[meshDrawData.numIndices];
+				const uint32_t indexOffset = static_cast<uint32_t>(modelIndices.size());
+
+				meshDrawData.buffers.indexStartOffset = indexOffset;
+
+				modelIndices.resize(modelIndices.size() + meshDrawData.numIndices);
 
 				int indexIndex = 0; // ok
 				for (int k = mesh->firstIdx; k < mesh->firstIdx	+ (mesh->triCount*3); ++k)
 				{
-					meshIndexData[indexIndex] = indexLumpData[k] + mtlSort->firstVertex;
+					modelIndices[indexOffset + indexIndex] = indexLumpData[k] + mtlSort->firstVertex;
 
 					indexIndex++;
 				}
 
-				meshDrawData.vertexBuffer = lumpVertexBuffers[meshVertLumpId];
-
-				CreateD3DBuffer(
-					g_dxHandler->GetDevice(),
-					&meshDrawData.indexBuffer,
-					static_cast<UINT>(meshDrawData.numIndices*sizeof(uint32_t)),
-					D3D11_USAGE_DYNAMIC,
-					D3D11_BIND_INDEX_BUFFER,
-					D3D11_CPU_ACCESS_WRITE,
-					0, 0,
-					meshIndexData
-				);
-
-
-				delete[] meshIndexData;
-
-
-				const dtexdata_t& tex = texLumpData[mtlSort->texdata];
-				std::string materialName = &texStringLumpData[tex.nameStringTableID];
-				materialName = "material/" + materialName + "_wldc.rpak";
-
-				CAsset* materialAsset = g_assetData.FindAsset(materialName);
-				if (materialAsset)
+				if (meshTextureCache.contains(mtlSort->texdata))
 				{
-					CPakAsset* matlPakAsset = reinterpret_cast<CPakAsset*>(materialAsset);
-					const MaterialAsset* const matl = reinterpret_cast<MaterialAsset*>(matlPakAsset->extraData());
+					meshDrawData.textures.push_back({ 0, meshTextureCache.at(mtlSort->texdata) });
+				}
+				else
+				{
+					const dtexdata_t& tex = texLumpData[mtlSort->texdata];
+					std::string materialName = &texStringLumpData[tex.nameStringTableID];
+					materialName = "material/" + materialName + "_wldc.rpak";
 
-					meshDrawData.textures.clear();
-					const TextureAssetEntry_t& texEntry = matl->txtrAssets[0];
-					//for (auto& texEntry : matl->txtrAssets)
+					CAsset* materialAsset = g_assetData.FindAsset(materialName);
+					if (materialAsset)
 					{
+						CPakAsset* matlPakAsset = reinterpret_cast<CPakAsset*>(materialAsset);
+						const MaterialAsset* const matl = reinterpret_cast<MaterialAsset*>(matlPakAsset->extraData());
+
+						meshDrawData.textures.clear();
+						const TextureAssetEntry_t& texEntry = matl->txtrAssets[0];
 						if (texEntry.asset)
 						{
 							TextureAsset* txtr = reinterpret_cast<TextureAsset*>(texEntry.asset->extraData());
-							const std::shared_ptr<CTexture> highestTextureMip = CreateTextureFromMip(texEntry.asset, &txtr->mipArray[std::min(2ull, txtr->mipArray.size() - 1)], s_PakToDxgiFormat[txtr->imgFormat]);
-							meshDrawData.textures.push_back({ texEntry.index, highestTextureMip });
+
+							// go thru the mips until we find the largest permanent one
+							// (idrc if the textures look a bit bad, using all starpak ones will be laggy)
+							// now featuring mipmapping!
+							std::shared_ptr<CTexture> highestTextureMip = nullptr;
+							for (const TextureMip_t& mip : txtr->mipArray | std::views::reverse)
+							{
+								if (mip.type != eTextureMipType::RPak)
+									continue;
+
+								highestTextureMip = CreateTextureFromMipChain(texEntry.asset, &mip, s_PakToDxgiFormat[txtr->imgFormat]);
+
+								if (highestTextureMip)
+									break;
+							}
+
+							meshDrawData.textures.push_back({ 0, highestTextureMip });
+
+							meshTextureCache.emplace(mtlSort->texdata, highestTextureMip);
 						}
 					}
 				}
@@ -527,9 +605,34 @@ CDXDrawData* CBSPData::ConstructPreviewData()
 				m_drawData->meshBuffers.push_back(meshDrawData);
 			}
 		}
+
+		ID3D11Buffer* indexBuffer = nullptr;
+
+		CreateD3DBuffer(
+			g_dxHandler->GetDevice(),
+			&indexBuffer,
+			static_cast<UINT>(modelIndices.size()*sizeof(uint32_t)),
+			D3D11_USAGE_IMMUTABLE,
+			D3D11_BIND_INDEX_BUFFER,
+			0,
+			0, 0,
+			modelIndices.data()
+		);
+
+		const uint32_t indexBufferIdx = m_drawData->AddCommonBuffer(indexBuffer);
+
+		for (auto& mesh : m_drawData->meshBuffers)
+		{
+			mesh.buffers.indexBufferIdx = indexBufferIdx;
+		}
 	}
 
-	CreateDXDrawDataTransformsBuffer(m_drawData);
+	for (auto& [flagName, flagVal] : s_dxMeshTypeFlags)
+	{
+		ImGui::CheckboxFlags(flagName, &m_drawData->state.disabledFlags, flagVal);
+	}
+
+	Preview_MapTransformsBuffer(m_drawData);
 
 	return m_drawData;
 }

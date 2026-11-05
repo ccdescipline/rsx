@@ -335,23 +335,6 @@ namespace vg
 		inline const uint16_t ExtraWeightsStartIndex() const { return weight[1]; }
 	};
 
-	struct BlendWeightIndicesPacked_256_s
-	{
-		uint32_t firstBone : 8;
-		uint32_t lastBone : 8;
-		uint32_t unk : 8;
-		uint32_t boneCount : 8;
-	};
-
-	struct BlendWeightIndicesPacked_1024_s
-	{
-		// (1 << 10) bones! (1024)
-		uint32_t firstBone : 10;
-		uint32_t lastBone : 10;
-		uint32_t unk : 4;
-		uint32_t boneCount : 8;
-	};
-
 	// Templated to the number of bits for each complex bone index
 	struct BlendWeightIndices_s
 	{
@@ -364,6 +347,23 @@ namespace vg
 
 			return reinterpret_cast<uint8_t*>(this)[i];
 		}
+	};
+
+	struct BlendWeightExtraIndices_256_s
+	{
+		uint32_t firstBone : 8;
+		uint32_t lastBone : 8;
+		uint32_t unk : 8;
+		uint32_t boneCount : 8;
+	};
+
+	struct BlendWeightExtraIndices_1024_s
+	{
+		// (1 << 10) bones! (1024)
+		uint32_t firstBone : 10;
+		uint32_t lastBone : 10;
+		uint32_t unk : 4;
+		uint32_t boneCount : 8;
 	};
 
 	struct Vertex_t
@@ -474,7 +474,7 @@ namespace vg
 			// vvw::mstudioboneweightextra_t
 			int extraBoneWeightOffset;	// start offset for this mesh's extra bone weights
 			int extraBoneWeightSize;	// size or count of extra bone weights
-			inline const vvw::mstudioboneweightextra_t* const pBoneWeight(const VertexGroupHeader_t* const hdr) const { return extraBoneWeightSize > 0 ? hdr->pBoneWeights() + (extraBoneWeightOffset / sizeof(vvw::mstudioboneweightextra_t)) : nullptr; };
+			inline const vvw::mstudioboneweightextra_t* const pBoneWeights(const VertexGroupHeader_t* const hdr) const { return extraBoneWeightSize > 0 ? hdr->pBoneWeights() + (extraBoneWeightOffset / sizeof(vvw::mstudioboneweightextra_t)) : nullptr; };
 
 			// unsigned short
 			int indexOffset;		// index into indices
@@ -1000,7 +1000,7 @@ struct mstudio_meshvertexloddata_t
 struct mstudiobodyparts_t
 {
 	int sznameindex;
-	inline char* const pszName() const { return ((char*)this + sznameindex); }
+	inline const char* const pszName() const { return ((char*)this + sznameindex); }
 
 	int nummodels;
 	int base;
@@ -1126,7 +1126,8 @@ class StudioLooseData_t
 {
 public:
 	StudioLooseData_t(const std::filesystem::path& path, const char* const name, char* buffer, const size_t bufferSize, const bool hasIDCV = false, const char* const aniname = nullptr); // DO NOT call this without managing the allocated buffers.
-	StudioLooseData_t(const char* const file);
+	StudioLooseData_t(const char* const file); // v53
+	StudioLooseData_t(const char* const file, const char* const vertex, const char* const physics); // v54
 	~StudioLooseData_t()
 	{
 		if (vertexBufAllocated)
@@ -1147,12 +1148,17 @@ public:
 
 	enum LooseDataType : int8_t
 	{
+		SLD_VTX_DX11,
+		SLD_VTX_DX9,
+		SLD_VTX_DX8,
+		SLD_VTX_SW,	// software
 		SLD_VTX,
 		SLD_VVD,
 		SLD_VVC,
 		SLD_VVW,
 
-		SLD_COUNT
+		SLD_COUNT,
+		SLD_VTX_COUNT = SLD_VVC,
 	};
 
 	inline const char* const VertBuf() const { return vertexDataBuffer; }
@@ -1163,7 +1169,7 @@ public:
 	inline const int PhysOffset() const { return physicsDataOffset; }
 	inline const int PhysSize() const { return physicsDataSize; }
 
-	inline const OptimizedModel::FileHeader_t* const GetVTX() const { return vertexDataSize[SLD_VTX] ? reinterpret_cast<const OptimizedModel::FileHeader_t* const>(vertexDataBuffer + vertexDataOffset[SLD_VTX]) : nullptr; }
+	inline const OptimizedModel::FileHeader_t* const GetVTX() const { return vertexDataSize[primaryVTX] ? reinterpret_cast<const OptimizedModel::FileHeader_t* const>(vertexDataBuffer + vertexDataOffset[primaryVTX]) : nullptr; }
 	inline const vvd::vertexFileHeader_t* const GetVVD() const { return vertexDataSize[SLD_VVD] ? reinterpret_cast<const vvd::vertexFileHeader_t* const>(vertexDataBuffer + vertexDataOffset[SLD_VVD]) : nullptr; }
 	inline const vvc::vertexColorFileHeader_t* const GetVVC() const { return vertexDataSize[SLD_VVC] ? reinterpret_cast<const vvc::vertexColorFileHeader_t* const>(vertexDataBuffer + vertexDataOffset[SLD_VVC]) : nullptr; }
 	inline const vvw::vertexBoneWeightsExtraFileHeader_t* const GetVVW() const { return vertexDataSize[SLD_VVW] ? reinterpret_cast<const vvw::vertexBoneWeightsExtraFileHeader_t* const>(vertexDataBuffer + vertexDataOffset[SLD_VVW]) : nullptr; }
@@ -1191,10 +1197,16 @@ private:
 	bool vertexBufAllocated;
 	bool physicsBufAllocated;
 	bool animBufAllocated;
+
+	LooseDataType primaryVTX;
 };
 
 static const char* s_StudioLooseDataExtensions[StudioLooseData_t::LooseDataType::SLD_COUNT] = {
 	".dx11.vtx",
+	".dx90.vtx",
+	".dx80.vtx",
+	".sw.vtx",
+	".vtx",
 	".vvd",
 	".vvc",
 	".vvw",
@@ -1224,6 +1236,24 @@ inline const char* StudioContentFlagString(const int contents)
 	{
 		return "water";
 	}
+	case CONTENTS_PLAYERCLIP:
+	{
+		// models/levels_terrain\mp_relic\mp_relic_ship_engine_collision.mdl (r1)
+		// how do I even know what the proper text for this would be?
+		return "playerclip";
+	}
+	case CONTENTS_TITANCLIP:
+	{
+		// models/levels_terrain\mp_relic\mp_relic_ship_engine_collision.mdl (r1)
+		// how do I even know what the proper text for this would be?
+		return "titanclip";
+	}
+	case CONTENTS_BULLETCLIP:
+	{
+		// models/imc_base\chain_link_imc_01.mdl (r1)
+		// how do I even know what the proper text for this would be?
+		return "bulletclip";
+	}
 	case CONTENTS_MONSTER:
 	{
 		return "monster";
@@ -1245,5 +1275,23 @@ inline const char* StudioContentFlagString(const int contents)
 	};
 }
 
-// generic pre def
-struct studiohdr_generic_t;
+// previously in studio_generic
+// make x axis y axis, and y axis negative x axis
+void StaticPropFlipFlop(Vector& in);
+
+// shouldn't append on first lod if name doesn't have _lod%i in it
+inline void FixupExportLodNames(std::string& fileName, int lodLevel)
+{
+	char lodName[16]{};
+
+	if (fileName.rfind("_lod0") != std::string::npos || fileName.rfind("_LOD0") != std::string::npos)
+	{
+		snprintf(lodName, 8, "%i", lodLevel);
+		fileName.replace(fileName.length() - 1, 8, lodName);
+
+		return;
+	}
+
+	snprintf(lodName, 8, "_lod%i", lodLevel);
+	fileName.append(lodName);
+}

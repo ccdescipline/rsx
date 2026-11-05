@@ -64,10 +64,34 @@ struct DXDrawDataTexture_t
     std::shared_ptr<CTexture> texture;
 };
 
+#define DMDD_TRIGGER (1 << 0) // trigger_*
+#define DMDD_WATER   (1 << 1)
+#define DMDD_FOGVOL  (1 << 2) // fog_volume
+#define DMDD_EXPVOL  (1 << 3) // exposure_volume
+
+static const std::map<const char*, int> s_dxMeshTypeFlags = {
+    {"Triggers", DMDD_TRIGGER},
+    {"Water", DMDD_WATER},
+    {"Fog Volumes", DMDD_FOGVOL},
+    {"Exposure Volumes", DMDD_EXPVOL}
+};
+
 struct DXMeshDrawData_t
 {
-    ID3D11Buffer* vertexBuffer;
-    ID3D11Buffer* indexBuffer;
+    union {
+        struct {
+            ID3D11Buffer* vertexBuffer;
+            ID3D11Buffer* indexBuffer;
+        };
+        struct {
+            uint32_t vertexBufferIdx;
+            uint32_t indexBufferIdx;
+
+            uint32_t vertexStartOffset;
+            uint32_t indexStartOffset;
+        };
+    } buffers;
+
 
     ID3D11Buffer* weightsBuffer;
     ID3D11ShaderResourceView* weightsSRV;
@@ -91,10 +115,28 @@ struct DXMeshDrawData_t
     Vector modelMins;
     Vector modelMaxs;
 
+    uint32_t meshTypeFlags;
+
     bool visible : 1;
     bool doFrustumCulling : 1;
     bool hasGameShaders : 1;
     bool wireframe : 1;
+    bool usesCommonBuffers : 1;
+
+    uint32_t GetVBIndex() const
+    {
+        return usesCommonBuffers ? buffers.vertexBufferIdx : UINT32_MAX;
+    }
+
+    uint32_t GetIBIndex() const
+    {
+        return usesCommonBuffers ? buffers.indexBufferIdx : UINT32_MAX;
+    }
+
+    uint32_t GetIndexStart() const
+    {
+        return usesCommonBuffers ? buffers.indexStartOffset : 0;
+    }
 };
 
 // Mesh draw data for ""debug draw"" primitives
@@ -253,6 +295,14 @@ struct DXBone_t
     int parent;
 };
 
+struct DXState_t
+{
+    uint32_t currentVertexBufIdx;
+    uint32_t currentIndexBufIdx;
+
+    uint32_t disabledFlags;
+};
+
 class CDXDrawData
 {
 public:
@@ -263,7 +313,13 @@ public:
         TEXTURE,
     };
 
-    CDXDrawData() : bones() {};
+    CDXDrawData() : bones(),
+        transformsBuffer(nullptr), modelInstanceBuffer(nullptr),
+        boneMatrixBuffer(nullptr), boneMatrixSRV(nullptr),
+        inputLayout(nullptr),
+        modelName(""), position(0.f), dataType(DrawDataType_e::MODEL),
+        state({UINT32_MAX, UINT32_MAX, 0})
+    {};
 
     ~CDXDrawData()
     {
@@ -273,18 +329,23 @@ public:
         DX_RELEASE_PTR(boneMatrixBuffer);
         for (auto& meshBuffer : meshBuffers)
         {
-            DX_RELEASE_PTR(meshBuffer.vertexBuffer);
-            DX_RELEASE_PTR(meshBuffer.indexBuffer);
+            if (!meshBuffer.usesCommonBuffers)
+            {
+                DX_RELEASE_PTR(meshBuffer.buffers.vertexBuffer);
+                DX_RELEASE_PTR(meshBuffer.buffers.indexBuffer);
+            }
+
             DX_RELEASE_PTR(meshBuffer.weightsBuffer);
         }
     }
+
+    std::vector<ID3D11Buffer*> commonBuffers;
 
     std::vector<DXMeshDrawData_t> meshBuffers;
     std::vector<DXMeshDrawData_DebugPrim_t> debugPrims;
 
     std::vector<DXBone_t> bones;
     std::vector<XMMATRIX> boneInverseBindMatrices;
-
 
     ID3D11Buffer* transformsBuffer;
     ID3D11Buffer* modelInstanceBuffer;
@@ -296,17 +357,16 @@ public:
 
     ID3D11InputLayout* inputLayout;
 
-    CShader* pixelShader;
-    CShader* vertexShader;
-
     std::unordered_map<uint8_t, ID3D11ShaderResourceView*> pixelShaderResources;
     std::unordered_map<uint8_t, ID3D11ShaderResourceView*> vertexShaderResources;
 
-    char* modelName;
+    std::string modelName;
 
     Vector position;
 
     DrawDataType_e dataType;
+
+    DXState_t state;
 
     void SetPSResource(uint8_t bindPoint, ID3D11ShaderResourceView* srv)
     {
@@ -317,6 +377,57 @@ public:
     {
         vertexShaderResources[bindPoint] = srv;
     };
+
+    ID3D11Buffer* GetCommonBuffer(uint32_t idx)
+    {
+        if (idx >= commonBuffers.size())
+            return nullptr;
+
+        return commonBuffers.at(idx);
+    }
+
+    // Adds a buffer to the draw data's list of common buffers and returns its index for referencing
+    // If the buffer pointer is already registered, returns its index instead of adding a new entry
+    uint32_t AddCommonBuffer(ID3D11Buffer* buffer)
+    {
+        uint32_t i = 0;
+        for (auto& buf : commonBuffers)
+        {
+            if (buf == buffer)
+                return i;
+
+            i++;
+        }
+
+        commonBuffers.push_back(buffer);
+
+        assert(commonBuffers.size() < UINT32_MAX); // this will never get hit!
+
+        return static_cast<uint32_t>(commonBuffers.size() - 1);
+    }
+
+    // Removes and releases a common buffer from the vector once it is no longer in use.
+    // Does not affect other indices
+    bool ReleaseCommonBuffer(uint32_t idx)
+    {
+        if (commonBuffers.size() >= idx)
+            return false;
+
+        // Don't actually remove the index from the vector otherwise all of the other indices will be moved
+        DX_RELEASE_PTR(commonBuffers.at(idx));
+    }
+
+    // Removes and releases all common buffers from this draw data
+    // Invalidates all buffer indices
+    void ClearCommonBuffers()
+    {
+        for (auto& it : commonBuffers)
+        {
+            DX_RELEASE_PTR(it);
+        }
+
+        commonBuffers.clear();
+    }
 
     void DrawLine(const Vector& start, const Vector& end, uint32_t col, bool noDepthTest = false, float width = 1.f, float duration = 0.f);
 };

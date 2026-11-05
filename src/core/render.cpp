@@ -25,6 +25,7 @@
 
 #include <core/utils/gamefinder.h>
 #include <misc/ImGuiNotify.hpp>
+#include <imgui/implot/implot.h>
 
 extern CDXParentHandler* g_dxHandler;
 extern std::atomic<uint32_t> g_maxConcurrentThreadCount;
@@ -364,6 +365,12 @@ void SettingsWnd_Draw(CUIState* uiState)
         ImGui::SameLine();
         ImGuiExt::HelpMarker("Distance at which render of 3D objects will stop.");
 
+#if (PREVIEW_FIRST_PERSON)
+        ImGui::SliderFloat("Camera Movement Speed", &g_PreviewSettings.previewMovementSpeed, PREVIEW_SPEED_MIN, PREVIEW_SPEED_MAX);
+        ImGui::SameLine();
+        ImGuiExt::HelpMarker("Speed at which the camera moves through the 3D scene.\n");
+#endif
+
         // ===============================================================================================================
         ImGui::SeparatorText("Asset Settings");
 
@@ -523,7 +530,7 @@ static void MainWnd_MenuBar()
         ImGuiExt::IconText(ICON_CI_ERROR, ImVec4(1.f, 0.f, 0.f, 1.f)); ImGui::SameLine();
         ImGui::Text("%i", errorCounts.second);
 
-#if _DEBUG
+#if 1
         IMGUI_RIGHT_ALIGN_FOR_TEXT("Avg 1.000 ms/frame (100.0 FPS)"); // [rexx]: i hate this actually
 
         ImGuiIO& io = ImGui::GetIO();
@@ -844,6 +851,7 @@ void HandleRenderFrame()
                 .Window("Scene", true)
                 .DockLeft(0.25f)
                     .Window("Asset List")
+                    .Window("File Info")
                     .Done()
                 .DockRight(0.25f)
                     .Window("Asset Info");
@@ -866,6 +874,7 @@ void HandleRenderFrame()
 
 #if defined(DEBUG_IMGUI_DEMO)
     ImGui::ShowDemoWindow();
+    ImPlot::ShowDemoWindow(nullptr);
 #endif
 
     MainWnd_MenuBar();
@@ -876,6 +885,7 @@ void HandleRenderFrame()
 
     const bool shouldPopulateAssetWindows = !inJobAction && !g_assetData.v_assetContainers.empty();
 
+    // dude why did i do this to myself
     if (!SHOW_WELCOME_BOX && ImGui::Begin("Asset List", nullptr, ImGuiWindowFlags_MenuBar) && shouldPopulateAssetWindows)
     {
         std::vector<CGlobalAssetData::AssetLookup_t>& pakAssets = FilterConfig->textFilter.IsActive() ? s_filteredAssets : g_assetData.v_assets;
@@ -1057,6 +1067,48 @@ void HandleRenderFrame()
             ApplySelectionRequests(ms_io, s_selectedAssets, pakAssets);
 
             ImGui::EndTable();
+        }
+    }
+    if (!SHOW_WELCOME_BOX) ImGui::End();
+
+    if (!SHOW_WELCOME_BOX && ImGui::Begin("File Info", nullptr) && shouldPopulateAssetWindows)
+    {
+        static size_t selectedFileIndex = UINT64_MAX;
+        static std::string selectedFileName = "(none)";
+
+        if (g_assetData.v_assetContainers.size() > 1)
+        {
+            if (ImGui::BeginCombo("File", selectedFileName.c_str()))
+            {
+                size_t i = 0;
+                for (auto& it : g_assetData.v_assetContainers)
+                {
+                    const std::string filePath = it->GetFilePath().filename().string();
+                    if (ImGui::Selectable(filePath.c_str(), selectedFileIndex == i))
+                    {
+                        selectedFileName = filePath;
+                        selectedFileIndex = i;
+                    }
+
+                    i++;
+                }
+
+                ImGui::EndCombo();
+            }
+        }
+        else
+        {
+            selectedFileIndex = 0;
+            selectedFileName = g_assetData.v_assetContainers.at(selectedFileIndex)->GetFilePath().filename().string();
+        }
+
+        if (selectedFileIndex != UINT64_MAX && selectedFileIndex < g_assetData.v_assetContainers.size())
+        {
+            ImGui::PushFont(NULL, 16.f);
+            ImGui::TextDisabled("Selected: %s", selectedFileName.c_str());
+            ImGui::PopFont();
+
+            g_assetData.v_assetContainers.at(selectedFileIndex)->ContainerPreviewUI();
         }
     }
     if (!SHOW_WELCOME_BOX) ImGui::End();

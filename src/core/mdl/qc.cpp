@@ -2,7 +2,7 @@
 
 #include <core/mdl/qc.h>
 
-extern inline void StaticPropFlipFlop(Vector& in);
+extern void StaticPropFlipFlop(Vector& in);
 
 namespace qc
 {
@@ -1428,6 +1428,7 @@ namespace qc
 		return optionsIndex;
 	}
 
+	// todo: apex specific based off version, since it would be laid out different
 	CommandOption_t* CommandJiggleBone_ParseBinary(QCFile* const file, uint32_t* const numOptions, const void* const data, const uint32_t count, const bool store = false)
 	{
 		UNUSED(file);
@@ -2368,7 +2369,7 @@ namespace qc
 		{
 		case IK_SELF:
 		{
-			options[optionsIndex].Init(&s_CommandAnimation_Option_IKRule_Footstep);
+			options[optionsIndex].Init(&s_CommandAnimation_Option_IKRule_Touch);
 			options[optionsIndex].SetPtr(ikRule->bonename);
 			optionsIndex++;
 
@@ -2376,7 +2377,7 @@ namespace qc
 		}
 		case IK_GROUND:
 		{
-			options[optionsIndex].Init(&s_CommandAnimation_Option_IKRule_Touch);
+			options[optionsIndex].Init(&s_CommandAnimation_Option_IKRule_Footstep);
 			optionsIndex++;
 
 			break;
@@ -2930,7 +2931,7 @@ namespace qc
 			for (int i = 0; i < seqData->numBlends; i += seqData->GetWidth())
 			{
 				options[optionsIndex].Init(&s_CommandSequence_Option_Blends);
-				
+
 				if (seqData->GetWidth() == 1)
 				{
 					options[optionsIndex].SetPtr(seqData->blends[i], seqData->GetWidth());
@@ -3671,15 +3672,18 @@ namespace qc
 		const Command_t* const commandFirst = *reinterpret_cast<const Command_t* const* const>(a);
 		const Command_t* const commandSecond = *reinterpret_cast<const Command_t* const* const>(b);
 
-		const float thresholdFirst = CompareCommandLOD_GetThreshold(commandFirst);
-		const float thresholdSecond = CompareCommandLOD_GetThreshold(commandSecond);
-
-		// todo: test!!!
-		// sort shadowlod last
-		if (thresholdFirst == -1.0f)
+		// $shadowlod does not get a threshold option
+		if (commandFirst->GetCmd() == QC_SHADOWLOD)
 		{
 			return 1;
 		}
+		else if (commandSecond->GetCmd() == QC_SHADOWLOD)
+		{
+			return -1;
+		}
+
+		const float thresholdFirst = CompareCommandLOD_GetThreshold(commandFirst);
+		const float thresholdSecond = CompareCommandLOD_GetThreshold(commandSecond);
 
 		if (thresholdFirst < thresholdSecond)
 		{
@@ -3717,7 +3721,7 @@ namespace qc
 		return numSorted;
 	}
 
-	inline const bool CommadSortModel_UnsortedCMD(const CommandList_t cmd)
+	inline const bool CommandSortModel_UnsortedCMD(const CommandList_t cmd)
 	{
 		return (cmd == CommandList_t::QC_BODY || cmd == CommandList_t::QC_BODYGROUP || cmd == CommandList_t::QC_MODEL);
 	}
@@ -3734,7 +3738,7 @@ namespace qc
 			if (command->GetType() != type)
 				continue;
 
-			if (!CommadSortModel_UnsortedCMD(command->GetCmd()))
+			if (!CommandSortModel_UnsortedCMD(command->GetCmd()))
 			{
 				numGeneralSorted++;
 			}
@@ -3754,7 +3758,7 @@ namespace qc
 		{
 			const Command_t* const command = temp[i];
 
-			if (!CommadSortModel_UnsortedCMD(command->GetCmd()))
+			if (!CommandSortModel_UnsortedCMD(command->GetCmd()))
 			{
 				assertm(sortIdx < numSorted, "invalid index");
 
@@ -3774,9 +3778,15 @@ namespace qc
 		return numSorted;
 	}
 
+	inline const bool CommandSortLOD_UnsortedCMD(const CommandList_t cmd)
+	{
+		return (cmd == CommandList_t::QC_ALLOWROOTLODS || cmd == CommandList_t::QC_MINLOD);
+	}
+
 	const uint32_t CommandSortLOD(const Command_t* const commands, const Command_t** const sorted, const size_t numCommands, const CommandType_t type)
 	{
 		uint32_t numSorted = 0u;
+		uint32_t numSpecialSort = 0u;
 
 		for (size_t i = 0ull; i < numCommands; i++)
 		{
@@ -3787,13 +3797,39 @@ namespace qc
 
 			sorted[numSorted] = command;
 			numSorted++;
+
+			if (CommandSortLOD_UnsortedCMD(command->GetCmd()))
+			{
+				numSpecialSort++;
+			}
 		}
 
-		// we want to preserve order, and don't need to parse through again if $maxverts is not present
 		if (numSorted == 0)
 			return numSorted;
 
-		qsort(sorted, numSorted, sizeof(intptr_t), CompareCommandLOD);
+		if (numSpecialSort)
+		{
+			const Command_t** const temp = sorted + numSorted;
+			for (uint32_t i = 0u, spec = 0u, norm = 0u; i < numSorted; i++)
+			{
+				const Command_t* const command = sorted[i];
+
+				if (CommandSortLOD_UnsortedCMD(command->GetCmd()))
+				{
+					temp[spec] = command;
+					spec++;
+					continue;
+				}
+
+				temp[numSpecialSort + norm] = command;
+				norm++;
+			}
+
+			const size_t sortedSize = sizeof(intptr_t) * numSorted;
+			memcpy_s(sorted, sortedSize, temp, sortedSize);
+		}
+
+		qsort(sorted + numSpecialSort, numSorted - numSpecialSort, sizeof(intptr_t), CompareCommandLOD);
 
 		return numSorted;
 	}

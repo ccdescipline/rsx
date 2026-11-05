@@ -15,9 +15,33 @@
 #include "source.h"
 #include "event.h"
 
+void CMilesAudioBank::ContainerPreviewUI() const
+{
+	ImGui::PushStyleColor(ImGuiCol_Text, project ? ImVec4(0.875f, 1.f, 0.f, 1.f) : ImVec4(1.f, 0.f, 0.f, 1.f));
+	if (project)
+		ImGui::Text("Project loaded: %s", project->GetFilePath().filename().string().c_str());
+	else
+		ImGui::Text("Project unloaded.");
+	ImGui::PopStyleColor();
+
+	ImGui::Text("%u sources (%u valid, %u invalid)\n%u events", sourceCount, sourceCount - invalidSourceCount, invalidSourceCount, eventCount);
+
+	// Almost all of the data that we want to show actually belongs to the project, so return early if we can't use it
+	if (!project)
+		return;
+
+	ImGui::SeparatorText("Project");
+	project->DrawFileInfoWindow();
+
+}
+
 CMilesAudioAsset::~CMilesAudioAsset()
 {
-	delete (MilesSource_t*)m_assetData;
+	// wtf
+	if (this->GetAssetType() == (uint32_t)AssetType_t::AEVT)
+		delete (MilesEvent_s*)m_assetData;
+	else
+		delete (MilesSource_t*)m_assetData;
 };
 
 std::string CMilesAudioBank::GetStreamingFileNameForSource(const MilesSource_t* source) const
@@ -119,6 +143,7 @@ static void MilesBank_ParseSources(CMilesAudioBank* bank)
 
 		if (!bank->IsValidSource(sourceAssetData))
 		{
+			bank->TrackInvalidSource();
 			delete sourceAssetData;
 			continue;
 		}
@@ -156,12 +181,14 @@ static void MilesBank_ParseSources(CMilesAudioBank* bank)
 
 		sourceAsset->SetContainerName(bank->GetStreamingFileNameForSource(sourceAssetData));
 
+		bank->AddSourceName(sourceName);
+
 		if (sourceAsset != nullptr)
 			g_assetData.v_assets.push_back({ sourceAsset->GetAssetGUID(), sourceAsset });
 	}
 }
 
-
+#if HAS_MILES_EVENTS
 static void MilesBank_ParseEvents(CMilesAudioBank* bank)
 {
 	const EventName_s* const evNameArray = bank->GetEventNamesData();
@@ -179,15 +206,26 @@ static void MilesBank_ParseEvents(CMilesAudioBank* bank)
 		const EventName_s* const evName = &evNameArray[i];
 		const char* const eventData = reinterpret_cast<const char*>(evData) + evName->dataOffset;
 
-		const uint16_t decompSize = reinterpret_cast<const uint16_t*>(eventData)[0];
-		const uint16_t compSize = reinterpret_cast<const uint16_t*>(eventData)[1];
+		MilesEvent_s* event;
+		if (bank->GetVersion() == 13) // r2
+		{
+			// Titanfall 2 does not have compressed event data so there's no size header attached to the event data
+			// so we can't tell the full event data size without going through all actions.
+			// Event data became compressed with version 10.0.29 (May 9, 2018)
+			event = new MilesEvent_s(bank->GetVersion(), eventData, nullptr, {}, 0, 0, false);
+		}
+		else
+		{
+			const uint16_t decompSize = reinterpret_cast<const uint16_t*>(eventData)[0];
+			const uint16_t compSize = reinterpret_cast<const uint16_t*>(eventData)[1];
 
-		MilesEvent_s* event = new MilesEvent_s(eventData + 4, nullptr, {}, decompSize, compSize, false);
+			event = new MilesEvent_s(bank->GetVersion(), eventData + 4, nullptr, {}, decompSize, compSize, false);
+		}
 
 		const char* eventName = bank->GetString(evName->nameOffset);
 
 		CMilesAudioAsset* eventAsset = new CMilesAudioAsset(eventName, event, bank);
-		eventAsset->SetAssetType((uint32_t)AssetType_t::AEVT); // asrc - audio source
+		eventAsset->SetAssetType((uint32_t)AssetType_t::AEVT); // aevt - audio event
 		eventAsset->SetAssetGUID(RTech::StringToGuid(eventName));
 		eventAsset->SetAssetVersion({ bank->GetVersion() });
 
@@ -197,6 +235,7 @@ static void MilesBank_ParseEvents(CMilesAudioBank* bank)
 			g_assetData.v_assets.push_back({ eventAsset->GetAssetGUID(), eventAsset });
 	}
 }
+#endif
 
 const bool CMilesAudioBank::ParseFromHeader()
 {
@@ -216,6 +255,7 @@ const bool CMilesAudioBank::ParseFromHeader()
 		this->DiscoverStreamingFiles();
 
 		MilesBank_ParseSources<MilesSource_v13_t>(this);
+		MilesBank_ParseEvents(this);
 
 		break;
 	}
@@ -284,7 +324,8 @@ const bool CMilesAudioBank::ParseFromHeader()
 
 		break;
 	}
-	case 49: // Apex Season 30.0   2026_07_29_15_44, released 
+	case 49: // Apex Season 30.0   2026_07_29_15_44, released
+	case 50:
 	{
 		this->languageNames = {
 			"english", "french", "german", "spanish", "italian",
@@ -333,9 +374,28 @@ const bool CMilesAudioBank::ParseFile(const std::string& path)
 		Log("MBNK: Tried to parse unimplemented file version %i.\n", hdrShort->version);
 		return false;
 	}
-	else
+	else Log("MBNK: Loaded bank \"%s\" with %u sources and %u events.\n", this->stringTable, this->sourceCount, this->eventCount);
+
+
+	std::filesystem::path projectPath(path);
+	projectPath.replace_filename(m_version <= 13 ? "titanfall_2.mprj" : "audio.mprj");
+
+	this->project = std::make_unique<CMilesAudioProject>();
+
+	if (!this->project->ParseFile(projectPath))
 	{
-		Log("MBNK: Loaded bank \"%s\" with %u sources and %u events.\n", this->stringTable, this->sourceCount, this->eventCount);
+		this->project.reset();
+
+		Log("MBNK: Failed to load project\n");
 		return true;
 	}
+
+	if (project->GetLanguageNames().size() != languageNames.size())
+	{
+		Log("MBNK: Mismatched language names between MPRJ and MBNK. Using the project's language definitions.\n");
+
+		languageNames = project->GetLanguageNames();
+	}
+
+	return true;
 }

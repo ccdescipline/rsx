@@ -35,7 +35,7 @@ void Vertex_t::ParseWeightFromVG_256(Vertex_t* const vert, VertexWeight_t* const
 	// model has more than 3 weights per vertex
 	if (parseFlags & VERT_PARSE_EXTRAWEIGHT)
 	{
-		const vg::BlendWeightIndicesPacked_256_s* const blendIndices = VERT_DATA(vg::BlendWeightIndicesPacked_256_s, rawVertexData, offset + 4);
+		const vg::BlendWeightExtraIndices_256_s* const blendIndices = VERT_DATA(vg::BlendWeightExtraIndices_256_s, rawVertexData, offset + 4);
 
 		assertm(blendIndices->boneCount < 16, "model had more than 16 bones on complex weights");
 
@@ -121,7 +121,7 @@ void Vertex_t::ParseWeightFromVG_1024(Vertex_t* const vert, VertexWeight_t* cons
 	// model has more than 3 weights per vertex
 	if (parseFlags & VERT_PARSE_EXTRAWEIGHT)
 	{
-		const vg::BlendWeightIndicesPacked_1024_s* const blendIndices = VERT_DATA(vg::BlendWeightIndicesPacked_1024_s, rawVertexData, offset + 4);
+		const vg::BlendWeightExtraIndices_1024_s* const blendIndices = VERT_DATA(vg::BlendWeightExtraIndices_1024_s, rawVertexData, offset + 4);
 
 		assertm(blendIndices->boneCount < 16, "model had more than 16 bones on complex weights");
 
@@ -450,115 +450,1648 @@ void ModelMeshData_t::ParseTexcoords()
 void ModelMeshData_t::ParseMaterial(ModelParsedData_t* const parsed, const int material)
 {
 	// [rika]: handling mesh's material here since we've already looped through everything
-	assertm(material < parsed->materials.size() && material >= 0, "invalid mesh material index");
+	assertm(material < parsed->numMaterials && material >= 0, "invalid mesh material index");
 	materialId = material;
-	materialAsset = parsed->materials.at(material).asset;
+	materialAsset = parsed->materials[material].asset;
 }
+
+// model parsed data
+const uint8_t s_DefaultBoneStates_256[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+const uint16_t s_DefaultBoneStates_1024[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+
+// clamp silly studiomdl offsets (negative is base ptr)
+#define FIX_FILE_OFFSET(offset) (offset < 0 ? 0 : offset)
+
+ModelParsedData_t::ModelParsedData_t(const r1::studiohdr_t* const pHdr, const AssetVersion_t& fileVersion, StudioLooseData_t* const looseData) :
+	baseptr(reinterpret_cast<const char* const>(pHdr)), version(fileVersion), flags(pHdr->flags), length(pHdr->length), name(pHdr->pszName()), mass(pHdr->mass), contents(pHdr->contents),
+
+	// bone
+	linearBone(nullptr), bones(nullptr), numBones(0), srcBoneTransforms(nullptr), numSrcBoneTransforms(0), attachments(nullptr), numAttachments(0), hitboxSets(nullptr), numHitboxSets(0),
+
+	// animation
+	localSequences(nullptr), numLocalSequences(0), externalSequences(nullptr), numExternalSequences(0), externalIncludeModels(nullptr), numExternalIncludeModels(0), includeModels(nullptr), numIncludeModels(0),
+	localNodeNames(nullptr), numLocalNodes(0), poseParams(nullptr), numPoseParm(0), ikChains(nullptr), numIkChains(0), ikLocks(nullptr), numIkLocks(0),
+
+	// material
+	materials(nullptr), numMaterials(0), skins(nullptr), numSkins(0), cdMaterials(nullptr), numCdMaterials(0),
+
+	// misc
+	surfaceProp(pHdr->pszSurfaceProp()), keyValues(pHdr->KeyValueText()), keyValueSize(-1), constdirectionallightdot(0), rootLOD(0), numAllowedRootLODs(0),
+	fadeDistance(pHdr->fadeDistance), gatherSize(0.0f), illumpositionattachmentindex(pHdr->IllumPositionAttachmentIndex()), flMaxEyeDeflection(pHdr->MaxEyeDeflection()),
+
+	// file
+	vtxOffset(looseData->VertOffset(StudioLooseData_t::SLD_VTX)), vvdOffset(looseData->VertOffset(StudioLooseData_t::SLD_VVD)), vvcOffset(looseData->VertOffset(StudioLooseData_t::SLD_VVC)), vvwOffset(-1), phyOffset(looseData->PhysOffset()),
+	vtxSize(looseData->VertSize(StudioLooseData_t::SLD_VTX)), vvdSize(looseData->VertSize(StudioLooseData_t::SLD_VVD)), vvcSize(looseData->VertSize(StudioLooseData_t::SLD_VVC)), vvwSize(-1), phySize(looseData->PhysSize()), hwDataSize(0),
+
+	// lod
+	hwGroups(nullptr), numHwGroups(0), lods(nullptr), numLODs(0), boneStates(nullptr), numBoneStates(0), bodyparts(nullptr), numBodyparts(0),
+
+	// collision
+	bvhData(nullptr)
+{
+	INDEX_STORE_32(bones, numBones, pHdr->boneindex, pHdr->numbones, 0);
+
+	if (pHdr->pLinearBones())
+	{
+		linearBone = reinterpret_cast<const char* const>(pHdr->pLinearBones());
+	}
+
+	if (pHdr->NumSrcBoneTransforms())
+	{
+		numSrcBoneTransforms = pHdr->NumSrcBoneTransforms();
+		srcBoneTransforms = reinterpret_cast<const mstudiosrcbonetransform_t* const>(pHdr->SrcBoneTransform(0));
+	}
+
+	INDEX_STORE_32(attachments, numAttachments, pHdr->localattachmentindex, pHdr->numlocalattachments, 0);
+	INDEX_STORE_32(hitboxSets, numHitboxSets, pHdr->hitboxsetindex, pHdr->numhitboxsets, 0);
+
+
+	INDEX_STORE_32(materials, numMaterials, pHdr->textureindex, pHdr->numtextures, 0);
+	INDEX_STORE_32(skins, numSkins, pHdr->skinindex, pHdr->numskinfamilies, 0);
+	INDEX_STORE_32(cdMaterials, numCdMaterials, pHdr->cdtextureindex, pHdr->numcdtextures, 0);
+
+	INDEX_STORE_32(bodyparts, numBodyparts, pHdr->bodypartindex, pHdr->numbodyparts, 0);
+
+	INDEX_STORE_32(localSequences, numLocalSequences, pHdr->localseqindex, pHdr->numlocalseq, 0);
+	INDEX_STORE_32(localNodeNames, numLocalNodes, pHdr->localnodenameindex, pHdr->numlocalnodes, 0);
+	INDEX_STORE_32(poseParams, numPoseParm, pHdr->localposeparamindex, pHdr->numlocalposeparameters, 0);
+	INDEX_STORE_32(ikChains, numIkChains, pHdr->ikchainindex, pHdr->numikchains, 0);
+	INDEX_STORE_32(ikLocks, numIkLocks, pHdr->localikautoplaylockindex, pHdr->numlocalikautoplaylocks, 0);
+	INDEX_STORE_32(includeModels, numIncludeModels, pHdr->includemodelindex, pHdr->numincludemodels, 0);
+};
+
+
+ModelParsedData_t::ModelParsedData_t(const r2::studiohdr_t* const pHdr, const AssetVersion_t& fileVersion) :
+	baseptr(reinterpret_cast<const char* const>(pHdr)), version(fileVersion), flags(pHdr->flags), length(pHdr->length), name(pHdr->pszName()), mass(pHdr->mass), contents(pHdr->contents),
+
+	// bone
+	linearBone(nullptr), bones(nullptr), numBones(0), srcBoneTransforms(nullptr), numSrcBoneTransforms(0), attachments(nullptr), numAttachments(0), hitboxSets(nullptr), numHitboxSets(0),
+
+	// animation
+	localSequences(nullptr), numLocalSequences(0), externalSequences(nullptr), numExternalSequences(0), externalIncludeModels(nullptr), numExternalIncludeModels(0), includeModels(nullptr), numIncludeModels(0),
+	localNodeNames(nullptr), numLocalNodes(0), poseParams(nullptr), numPoseParm(0), ikChains(nullptr), numIkChains(0), ikLocks(nullptr), numIkLocks(0),
+
+	// material
+	materials(nullptr), numMaterials(0), skins(nullptr), numSkins(0), cdMaterials(nullptr), numCdMaterials(0),
+
+	// misc
+	surfaceProp(pHdr->pszSurfaceProp()), keyValues(pHdr->KeyValueText()), keyValueSize(-1), constdirectionallightdot(0), rootLOD(0), numAllowedRootLODs(0),
+	fadeDistance(pHdr->fadeDistance), gatherSize(0.0f), illumpositionattachmentindex(pHdr->illumpositionattachmentindex), flMaxEyeDeflection(0.0f),
+
+	// file
+	vtxOffset(FIX_FILE_OFFSET(pHdr->vtxOffset)), vvdOffset(FIX_FILE_OFFSET(pHdr->vvdOffset)), vvcOffset(FIX_FILE_OFFSET(pHdr->vvdOffset)), vvwOffset(-1), phyOffset(FIX_FILE_OFFSET(pHdr->phyOffset)),
+	vtxSize(pHdr->vtxSize), vvdSize(pHdr->vvdSize), vvcSize(pHdr->vvcSize), vvwSize(0), phySize(pHdr->phySize), hwDataSize(0),
+
+	// lod
+	hwGroups(nullptr), numHwGroups(0), lods(nullptr), numLODs(0), boneStates(nullptr), numBoneStates(0), bodyparts(nullptr), numBodyparts(0),
+
+	// collision
+	bvhData(nullptr)
+{
+	INDEX_STORE_32(bones, numBones, pHdr->boneindex, pHdr->numbones, 0);
+
+	if (pHdr->linearboneindex)
+	{
+		linearBone = reinterpret_cast<const char* const>(baseptr) + pHdr->linearboneindex;
+	}
+
+	if (pHdr->numsrcbonetransform)
+	{
+		numSrcBoneTransforms = pHdr->numsrcbonetransform;
+		srcBoneTransforms = reinterpret_cast<const mstudiosrcbonetransform_t* const>(pHdr->SrcBoneTransform(0));
+	}
+
+	INDEX_STORE_32(attachments, numAttachments, pHdr->localattachmentindex, pHdr->numlocalattachments, 0);
+	INDEX_STORE_32(hitboxSets, numHitboxSets, pHdr->hitboxsetindex, pHdr->numhitboxsets, 0);
+
+
+	INDEX_STORE_32(materials, numMaterials, pHdr->textureindex, pHdr->numtextures, 0);
+	INDEX_STORE_32(skins, numSkins, pHdr->skinindex, pHdr->numskinfamilies, 0);
+	INDEX_STORE_32(cdMaterials, numCdMaterials, pHdr->cdtextureindex, pHdr->numcdtextures, 0);
+
+	INDEX_STORE_32(bodyparts, numBodyparts, pHdr->bodypartindex, pHdr->numbodyparts, 0);
+
+	INDEX_STORE_32(localSequences, numLocalSequences, pHdr->localseqindex, pHdr->numlocalseq, 0);
+	INDEX_STORE_32(localNodeNames, numLocalNodes, pHdr->localnodenameindex, pHdr->numlocalnodes, 0);
+	INDEX_STORE_32(poseParams, numPoseParm, pHdr->localposeparamindex, pHdr->numlocalposeparameters, 0);
+	INDEX_STORE_32(ikChains, numIkChains, pHdr->ikchainindex, pHdr->numikchains, 0);
+	INDEX_STORE_32(ikLocks, numIkLocks, pHdr->localikautoplaylockindex, pHdr->numlocalikautoplaylocks, 0);
+	INDEX_STORE_32(includeModels, numIncludeModels, pHdr->includemodelindex, pHdr->numincludemodels, 0);
+};
+
+ModelParsedData_t::ModelParsedData_t(const r5::studiohdr_v8_t* const pHdr, const AssetVersion_t& fileVersion) :
+	baseptr(reinterpret_cast<const char* const>(pHdr)), version(fileVersion), flags(pHdr->flags), length(pHdr->length), name(pHdr->pszName()), mass(pHdr->mass), contents(pHdr->contents),
+
+	// bone
+	linearBone(nullptr), bones(nullptr), numBones(0), srcBoneTransforms(nullptr), numSrcBoneTransforms(0), attachments(nullptr), numAttachments(0), hitboxSets(nullptr), numHitboxSets(0),
+
+	// animation
+	localSequences(nullptr), numLocalSequences(0), externalSequences(nullptr), numExternalSequences(0), externalIncludeModels(nullptr), numExternalIncludeModels(0), includeModels(nullptr), numIncludeModels(0),
+	localNodeNames(nullptr), numLocalNodes(0), poseParams(nullptr), numPoseParm(0), ikChains(nullptr), numIkChains(0), ikLocks(nullptr), numIkLocks(0),
+
+	// material
+	materials(nullptr), numMaterials(0), skins(nullptr), numSkins(0), cdMaterials(nullptr), numCdMaterials(0),
+
+	// misc
+	surfaceProp(pHdr->pszSurfaceProp()), keyValues(pHdr->KeyValueText()), keyValueSize(-1), constdirectionallightdot(0), rootLOD(0), numAllowedRootLODs(0),
+	fadeDistance(pHdr->fadeDistance), gatherSize(pHdr->gatherSize), illumpositionattachmentindex(pHdr->illumpositionattachmentindex), flMaxEyeDeflection(0.0f),
+
+	// file
+	vtxOffset(FIX_FILE_OFFSET(pHdr->vtxOffset)), vvdOffset(FIX_FILE_OFFSET(pHdr->vvdOffset)), vvcOffset(FIX_FILE_OFFSET(pHdr->vvdOffset)), vvwOffset(FIX_FILE_OFFSET(pHdr->vvwOffset)), phyOffset(FIX_FILE_OFFSET(pHdr->phyOffset)),
+	vtxSize(pHdr->vtxSize), vvdSize(pHdr->vvdSize), vvcSize(pHdr->vvcSize), vvwSize(pHdr->vvwSize), phySize(pHdr->phySize), hwDataSize(0),
+
+	// lod
+	hwGroups(nullptr), numHwGroups(0), lods(nullptr), numLODs(0), boneStates(nullptr), numBoneStates(0), bodyparts(nullptr), numBodyparts(0),
+
+	// collision
+	bvhData(nullptr)
+{
+	INDEX_STORE_32(bones, numBones, pHdr->boneindex, pHdr->numbones, 0);
+
+	if (pHdr->linearboneindex)
+	{
+		linearBone = reinterpret_cast<const char* const>(baseptr) + pHdr->linearboneindex;
+	}
+
+	if (pHdr->numsrcbonetransform)
+	{
+		numSrcBoneTransforms = pHdr->numsrcbonetransform;
+		srcBoneTransforms = pHdr->SrcBoneTransform(0);
+	}
+
+	INDEX_STORE_32(attachments, numAttachments, pHdr->localattachmentindex, pHdr->numlocalattachments, 0);
+	INDEX_STORE_32(hitboxSets, numHitboxSets, pHdr->hitboxsetindex, pHdr->numhitboxsets, 0);
+
+
+	INDEX_STORE_32(materials, numMaterials, pHdr->textureindex, pHdr->numtextures, 0);
+	INDEX_STORE_32(skins, numSkins, pHdr->skinindex, pHdr->numskinfamilies, 0);
+	INDEX_STORE_32(cdMaterials, numCdMaterials, pHdr->cdtextureindex, pHdr->numcdtextures, 0);
+
+	INDEX_STORE_32(bodyparts, numBodyparts, pHdr->bodypartindex, pHdr->numbodyparts, 0);
+
+	INDEX_STORE_32(localSequences, numLocalSequences, pHdr->localseqindex, pHdr->numlocalseq, 0);
+	INDEX_STORE_32(localNodeNames, numLocalNodes, pHdr->localnodenameindex, pHdr->numlocalnodes, 0);
+	INDEX_STORE_32(poseParams, numPoseParm, pHdr->localposeparamindex, pHdr->numlocalposeparameters, 0);
+	INDEX_STORE_32(ikChains, numIkChains, pHdr->ikchainindex, pHdr->numikchains, 0);
+	INDEX_STORE_32(ikLocks, numIkLocks, pHdr->localikautoplaylockindex, pHdr->numlocalikautoplaylocks, 0);
+	INDEX_STORE_32(includeModels, numIncludeModels, pHdr->includemodelindex, pHdr->numincludemodels, 0);
+
+	if (pHdr->bvhOffset)
+	{
+		bvhData = reinterpret_cast<const char* const>(pHdr) + pHdr->bvhOffset;
+	}
+};
+
+ModelParsedData_t::ModelParsedData_t(const r5::studiohdr_v12_1_t* const pHdr, const AssetVersion_t& fileVersion) :
+	baseptr(reinterpret_cast<const char* const>(pHdr)), version(fileVersion), flags(pHdr->flags), length(pHdr->length), name(pHdr->pszName()), mass(pHdr->mass), contents(pHdr->contents),
+
+	// bone
+	linearBone(nullptr), bones(nullptr), numBones(0), srcBoneTransforms(nullptr), numSrcBoneTransforms(0), attachments(nullptr), numAttachments(0), hitboxSets(nullptr), numHitboxSets(0),
+
+	// animation
+	localSequences(nullptr), numLocalSequences(0), externalSequences(nullptr), numExternalSequences(0), externalIncludeModels(nullptr), numExternalIncludeModels(0), includeModels(nullptr), numIncludeModels(0),
+	localNodeNames(nullptr), numLocalNodes(0), poseParams(nullptr), numPoseParm(0), ikChains(nullptr), numIkChains(0), ikLocks(nullptr), numIkLocks(0),
+
+	// material
+	materials(nullptr), numMaterials(0), skins(nullptr), numSkins(0), cdMaterials(nullptr), numCdMaterials(0),
+
+	// misc
+	surfaceProp(pHdr->pszSurfaceProp()), keyValues(pHdr->KeyValueText()), keyValueSize(-1), constdirectionallightdot(0), rootLOD(0), numAllowedRootLODs(0),
+	fadeDistance(pHdr->fadeDistance), gatherSize(pHdr->gatherSize), illumpositionattachmentindex(pHdr->illumpositionattachmentindex), flMaxEyeDeflection(0.0f),
+
+	// file
+	vtxOffset(FIX_FILE_OFFSET(pHdr->vtxOffset)), vvdOffset(FIX_FILE_OFFSET(pHdr->vvdOffset)), vvcOffset(FIX_FILE_OFFSET(pHdr->vvdOffset)), vvwOffset(FIX_FILE_OFFSET(pHdr->vvwOffset)), phyOffset(FIX_FILE_OFFSET(pHdr->phyOffset)),
+	vtxSize(pHdr->vtxSize), vvdSize(pHdr->vvdSize), vvcSize(pHdr->vvcSize), vvwSize(pHdr->vvwSize), phySize(pHdr->phySize), hwDataSize(0),
+
+	// lod
+	hwGroups(nullptr), numHwGroups(0), lods(nullptr), numLODs(0), boneStates(nullptr), numBoneStates(0), bodyparts(nullptr), numBodyparts(0),
+
+	// collision
+	bvhData(nullptr)
+{
+	INDEX_STORE_32(bones, numBones, pHdr->boneindex, pHdr->numbones, 0);
+
+	if (pHdr->linearboneindex)
+	{
+		linearBone = reinterpret_cast<const char* const>(baseptr) + pHdr->linearboneindex;
+	}
+
+	if (pHdr->numsrcbonetransform)
+	{
+		numSrcBoneTransforms = pHdr->numsrcbonetransform;
+		srcBoneTransforms = pHdr->SrcBoneTransform(0);
+	}
+
+	INDEX_STORE_32(attachments, numAttachments, pHdr->localattachmentindex, pHdr->numlocalattachments, 0);
+	INDEX_STORE_32(hitboxSets, numHitboxSets, pHdr->hitboxsetindex, pHdr->numhitboxsets, 0);
+
+
+	INDEX_STORE_32(materials, numMaterials, pHdr->textureindex, pHdr->numtextures, 0);
+	INDEX_STORE_32(skins, numSkins, pHdr->skinindex, pHdr->numskinfamilies, 0);
+	INDEX_STORE_32(cdMaterials, numCdMaterials, pHdr->cdtextureindex, pHdr->numcdtextures, 0);
+
+	INDEX_STORE_32(hwGroups, numHwGroups, (offsetof(r5::studiohdr_v12_1_t, groupHeaderOffset) + pHdr->groupHeaderOffset), pHdr->groupHeaderCount, 0);
+	INDEX_STORE_32(lods, numLODs, (offsetof(r5::studiohdr_v12_1_t, lodOffset) + pHdr->lodOffset), pHdr->lodCount, 0);
+	INDEX_STORE_32(bodyparts, numBodyparts, pHdr->bodypartindex, pHdr->numbodyparts, 0);
+
+	numBoneStates = pHdr->boneStateCount;
+	if (numBoneStates)
+	{
+		boneStates = pHdr->pBoneStates();
+	}
+	else
+	{
+		boneStates = s_DefaultBoneStates_256;
+	}
+
+	INDEX_STORE_32(localSequences, numLocalSequences, pHdr->localseqindex, pHdr->numlocalseq, 0);
+	INDEX_STORE_32(localNodeNames, numLocalNodes, pHdr->localnodenameindex, pHdr->numlocalnodes, 0);
+	INDEX_STORE_32(poseParams, numPoseParm, pHdr->localposeparamindex, pHdr->numlocalposeparameters, 0);
+	INDEX_STORE_32(ikChains, numIkChains, pHdr->ikchainindex, pHdr->numikchains, 0);
+	INDEX_STORE_32(ikLocks, numIkLocks, pHdr->localikautoplaylockindex, pHdr->numlocalikautoplaylocks, 0);
+	INDEX_STORE_32(includeModels, numIncludeModels, pHdr->includemodelindex, pHdr->numincludemodels, 0);
+
+	if (pHdr->bvhOffset)
+	{
+		bvhData = reinterpret_cast<const char* const>(pHdr) + pHdr->bvhOffset;
+	}
+};
+
+ModelParsedData_t::ModelParsedData_t(const r5::studiohdr_v12_2_t* const pHdr, const AssetVersion_t& fileVersion) :
+	baseptr(reinterpret_cast<const char* const>(pHdr)), version(fileVersion), flags(pHdr->flags), length(pHdr->length), name(pHdr->pszName()), mass(pHdr->mass), contents(pHdr->contents),
+
+	// bone
+	linearBone(nullptr), bones(nullptr), numBones(0), srcBoneTransforms(nullptr), numSrcBoneTransforms(0), attachments(nullptr), numAttachments(0), hitboxSets(nullptr), numHitboxSets(0),
+
+	// animation
+	localSequences(nullptr), numLocalSequences(0), externalSequences(nullptr), numExternalSequences(0), externalIncludeModels(nullptr), numExternalIncludeModels(0), includeModels(nullptr), numIncludeModels(0),
+	localNodeNames(nullptr), numLocalNodes(0), poseParams(nullptr), numPoseParm(0), ikChains(nullptr), numIkChains(0), ikLocks(nullptr), numIkLocks(0),
+
+	// material
+	materials(nullptr), numMaterials(0), skins(nullptr), numSkins(0), cdMaterials(nullptr), numCdMaterials(0),
+
+	// misc
+	surfaceProp(pHdr->pszSurfaceProp()), keyValues(pHdr->KeyValueText()), keyValueSize(-1), constdirectionallightdot(0), rootLOD(0), numAllowedRootLODs(0),
+	fadeDistance(pHdr->fadeDistance), gatherSize(pHdr->gatherSize), illumpositionattachmentindex(pHdr->illumpositionattachmentindex), flMaxEyeDeflection(0.0f),
+
+	// file
+	vtxOffset(FIX_FILE_OFFSET(pHdr->vtxOffset)), vvdOffset(FIX_FILE_OFFSET(pHdr->vvdOffset)), vvcOffset(FIX_FILE_OFFSET(pHdr->vvdOffset)), vvwOffset(FIX_FILE_OFFSET(pHdr->vvwOffset)), phyOffset(FIX_FILE_OFFSET(pHdr->phyOffset)),
+	vtxSize(pHdr->vtxSize), vvdSize(pHdr->vvdSize), vvcSize(pHdr->vvcSize), vvwSize(pHdr->vvwSize), phySize(pHdr->phySize), hwDataSize(0),
+
+	// lod
+	hwGroups(nullptr), numHwGroups(0), lods(nullptr), numLODs(0), boneStates(nullptr), numBoneStates(0), bodyparts(nullptr), numBodyparts(0),
+
+	// collision
+	bvhData(nullptr)
+{
+	INDEX_STORE_32(bones, numBones, pHdr->boneindex, pHdr->numbones, 0);
+
+	if (pHdr->linearboneindex)
+	{
+		linearBone = reinterpret_cast<const char* const>(baseptr) + pHdr->linearboneindex;
+	}
+
+	if (pHdr->numsrcbonetransform)
+	{
+		numSrcBoneTransforms = pHdr->numsrcbonetransform;
+		srcBoneTransforms = pHdr->SrcBoneTransform(0);
+	}
+
+	INDEX_STORE_32(attachments, numAttachments, pHdr->localattachmentindex, pHdr->numlocalattachments, 0);
+	INDEX_STORE_32(hitboxSets, numHitboxSets, pHdr->hitboxsetindex, pHdr->numhitboxsets, 0);
+
+
+	INDEX_STORE_32(materials, numMaterials, pHdr->textureindex, pHdr->numtextures, 0);
+	INDEX_STORE_32(skins, numSkins, pHdr->skinindex, pHdr->numskinfamilies, 0);
+	INDEX_STORE_32(cdMaterials, numCdMaterials, pHdr->cdtextureindex, pHdr->numcdtextures, 0);
+
+	INDEX_STORE_32(hwGroups, numHwGroups, (offsetof(r5::studiohdr_v12_2_t, groupHeaderOffset) + pHdr->groupHeaderOffset), pHdr->groupHeaderCount, 0);
+	INDEX_STORE_32(lods, numLODs, (offsetof(r5::studiohdr_v12_2_t, lodOffset) + pHdr->lodOffset), pHdr->lodCount, 0);
+	INDEX_STORE_32(bodyparts, numBodyparts, pHdr->bodypartindex, pHdr->numbodyparts, 0);
+
+	numBoneStates = pHdr->boneStateCount;
+	if (numBoneStates)
+	{
+		boneStates = pHdr->pBoneStates();
+	}
+	else
+	{
+		boneStates = s_DefaultBoneStates_256;
+	}
+
+	INDEX_STORE_32(localSequences, numLocalSequences, pHdr->localseqindex, pHdr->numlocalseq, 0);
+	INDEX_STORE_32(localNodeNames, numLocalNodes, pHdr->localnodenameindex, pHdr->numlocalnodes, 0);
+	INDEX_STORE_32(poseParams, numPoseParm, pHdr->localposeparamindex, pHdr->numlocalposeparameters, 0);
+	INDEX_STORE_32(ikChains, numIkChains, pHdr->ikchainindex, pHdr->numikchains, 0);
+	INDEX_STORE_32(ikLocks, numIkLocks, pHdr->localikautoplaylockindex, pHdr->numlocalikautoplaylocks, 0);
+	INDEX_STORE_32(includeModels, numIncludeModels, pHdr->includemodelindex, pHdr->numincludemodels, 0);
+
+	if (pHdr->bvhOffset)
+	{
+		bvhData = reinterpret_cast<const char* const>(pHdr) + pHdr->bvhOffset;
+	}
+};
+
+ModelParsedData_t::ModelParsedData_t(const r5::studiohdr_v12_4_t* const pHdr, const AssetVersion_t& fileVersion) :
+	baseptr(reinterpret_cast<const char* const>(pHdr)), version(fileVersion), flags(pHdr->flags), length(pHdr->length), name(pHdr->pszName()), mass(pHdr->mass), contents(pHdr->contents),
+
+	// bone
+	linearBone(nullptr), bones(nullptr), numBones(0), srcBoneTransforms(nullptr), numSrcBoneTransforms(0), attachments(nullptr), numAttachments(0), hitboxSets(nullptr), numHitboxSets(0),
+
+	// animation
+	localSequences(nullptr), numLocalSequences(0), externalSequences(nullptr), numExternalSequences(0), externalIncludeModels(nullptr), numExternalIncludeModels(0), includeModels(nullptr), numIncludeModels(0),
+	localNodeNames(nullptr), numLocalNodes(0), poseParams(nullptr), numPoseParm(0), ikChains(nullptr), numIkChains(0), ikLocks(nullptr), numIkLocks(0),
+
+	// material
+	materials(nullptr), numMaterials(0), skins(nullptr), numSkins(0), cdMaterials(nullptr), numCdMaterials(0),
+
+	// misc
+	surfaceProp(pHdr->pszSurfaceProp()), keyValues(pHdr->KeyValueText()), keyValueSize(-1), constdirectionallightdot(0), rootLOD(0), numAllowedRootLODs(0),
+	fadeDistance(pHdr->fadeDistance), gatherSize(pHdr->gatherSize), illumpositionattachmentindex(pHdr->illumpositionattachmentindex), flMaxEyeDeflection(0.0f),
+
+	// file
+	vtxOffset(FIX_FILE_OFFSET(pHdr->vtxOffset)), vvdOffset(FIX_FILE_OFFSET(pHdr->vvdOffset)), vvcOffset(FIX_FILE_OFFSET(pHdr->vvdOffset)), vvwOffset(FIX_FILE_OFFSET(pHdr->vvwOffset)), phyOffset(FIX_FILE_OFFSET(pHdr->phyOffset)),
+	vtxSize(pHdr->vtxSize), vvdSize(pHdr->vvdSize), vvcSize(pHdr->vvcSize), vvwSize(pHdr->vvwSize), phySize(pHdr->phySize), hwDataSize(0),
+
+	// lod
+	hwGroups(nullptr), numHwGroups(0), lods(nullptr), numLODs(0), boneStates(nullptr), numBoneStates(0), bodyparts(nullptr), numBodyparts(0),
+
+	// collision
+	bvhData(nullptr)
+{
+	INDEX_STORE_32(bones, numBones, pHdr->boneindex, pHdr->numbones, 0);
+
+	if (pHdr->linearboneindex)
+	{
+		linearBone = reinterpret_cast<const char* const>(baseptr) + pHdr->linearboneindex;
+	}
+
+	if (pHdr->numsrcbonetransform)
+	{
+		numSrcBoneTransforms = pHdr->numsrcbonetransform;
+		srcBoneTransforms = pHdr->SrcBoneTransform(0);
+	}
+
+	INDEX_STORE_32(attachments, numAttachments, pHdr->localattachmentindex, pHdr->numlocalattachments, 0);
+	INDEX_STORE_32(hitboxSets, numHitboxSets, pHdr->hitboxsetindex, pHdr->numhitboxsets, 0);
+
+
+	INDEX_STORE_32(materials, numMaterials, pHdr->textureindex, pHdr->numtextures, 0);
+	INDEX_STORE_32(skins, numSkins, pHdr->skinindex, pHdr->numskinfamilies, 0);
+	INDEX_STORE_32(cdMaterials, numCdMaterials, pHdr->cdtextureindex, pHdr->numcdtextures, 0);
+
+	INDEX_STORE_32(hwGroups, numHwGroups, (offsetof(r5::studiohdr_v12_4_t, groupHeaderOffset) + pHdr->groupHeaderOffset), pHdr->groupHeaderCount, 0);
+	INDEX_STORE_32(lods, numLODs, (offsetof(r5::studiohdr_v12_4_t, lodOffset) + pHdr->lodOffset), pHdr->lodCount, 0);
+	INDEX_STORE_32(bodyparts, numBodyparts, pHdr->bodypartindex, pHdr->numbodyparts, 0);
+
+	numBoneStates = pHdr->boneStateCount;
+	if (numBoneStates)
+	{
+		boneStates = pHdr->pBoneStates();
+	}
+	else
+	{
+		boneStates = s_DefaultBoneStates_256;
+	}
+
+	INDEX_STORE_32(localSequences, numLocalSequences, pHdr->localseqindex, pHdr->numlocalseq, 0);
+	INDEX_STORE_32(localNodeNames, numLocalNodes, pHdr->localnodenameindex, pHdr->numlocalnodes, 0);
+	INDEX_STORE_32(poseParams, numPoseParm, pHdr->localposeparamindex, pHdr->numlocalposeparameters, 0);
+	INDEX_STORE_32(ikChains, numIkChains, pHdr->ikchainindex, pHdr->numikchains, 0);
+	INDEX_STORE_32(ikLocks, numIkLocks, pHdr->localikautoplaylockindex, pHdr->numlocalikautoplaylocks, 0);
+	INDEX_STORE_32(includeModels, numIncludeModels, pHdr->includemodelindex, pHdr->numincludemodels, 0);
+
+	if (pHdr->bvhOffset)
+	{
+		bvhData = reinterpret_cast<const char* const>(pHdr) + pHdr->bvhOffset;
+	}
+};
+
+ModelParsedData_t::ModelParsedData_t(const r5::studiohdr_v14_t* const pHdr, const AssetVersion_t& fileVersion) :
+	baseptr(reinterpret_cast<const char* const>(pHdr)), version(fileVersion), flags(pHdr->flags), length(pHdr->length), name(pHdr->pszName()), mass(pHdr->mass), contents(pHdr->contents),
+
+	// bone
+	linearBone(nullptr), bones(nullptr), numBones(0), srcBoneTransforms(nullptr), numSrcBoneTransforms(0), attachments(nullptr), numAttachments(0), hitboxSets(nullptr), numHitboxSets(0),
+
+	// animation
+	localSequences(nullptr), numLocalSequences(0), externalSequences(nullptr), numExternalSequences(0), externalIncludeModels(nullptr), numExternalIncludeModels(0), includeModels(nullptr), numIncludeModels(0),
+	localNodeNames(nullptr), numLocalNodes(0), poseParams(nullptr), numPoseParm(0), ikChains(nullptr), numIkChains(0), ikLocks(nullptr), numIkLocks(0),
+
+	// material
+	materials(nullptr), numMaterials(0), skins(nullptr), numSkins(0), cdMaterials(nullptr), numCdMaterials(0),
+
+	// misc
+	surfaceProp(pHdr->pszSurfaceProp()), keyValues(pHdr->KeyValueText()), keyValueSize(-1), constdirectionallightdot(0), rootLOD(0), numAllowedRootLODs(0),
+	fadeDistance(pHdr->fadeDistance), gatherSize(pHdr->gatherSize), illumpositionattachmentindex(pHdr->illumpositionattachmentindex), flMaxEyeDeflection(0.0f),
+
+	// file
+	vtxOffset(FIX_FILE_OFFSET(pHdr->vtxOffset)), vvdOffset(FIX_FILE_OFFSET(pHdr->vvdOffset)), vvcOffset(FIX_FILE_OFFSET(pHdr->vvdOffset)), vvwOffset(FIX_FILE_OFFSET(pHdr->vvwOffset)), phyOffset(FIX_FILE_OFFSET(pHdr->phyOffset)),
+	vtxSize(pHdr->vtxSize), vvdSize(pHdr->vvdSize), vvcSize(pHdr->vvcSize), vvwSize(pHdr->vvwSize), phySize(pHdr->phySize), hwDataSize(0),
+
+	// lod
+	hwGroups(nullptr), numHwGroups(0), lods(nullptr), numLODs(0), boneStates(nullptr), numBoneStates(0), bodyparts(nullptr), numBodyparts(0),
+
+	// collision
+	bvhData(nullptr)
+{
+	INDEX_STORE_32(bones, numBones, pHdr->boneindex, pHdr->numbones, 0);
+
+	if (pHdr->linearboneindex)
+	{
+		linearBone = reinterpret_cast<const char* const>(baseptr) + pHdr->linearboneindex;
+	}
+
+	if (pHdr->numsrcbonetransform)
+	{
+		numSrcBoneTransforms = pHdr->numsrcbonetransform;
+		srcBoneTransforms = pHdr->SrcBoneTransform(0);
+	}
+
+	INDEX_STORE_32(attachments, numAttachments, pHdr->localattachmentindex, pHdr->numlocalattachments, 0);
+	INDEX_STORE_32(hitboxSets, numHitboxSets, pHdr->hitboxsetindex, pHdr->numhitboxsets, 0);
+
+
+	INDEX_STORE_32(materials, numMaterials, pHdr->textureindex, pHdr->numtextures, 0);
+	INDEX_STORE_32(skins, numSkins, pHdr->skinindex, pHdr->numskinfamilies, 0);
+	INDEX_STORE_32(cdMaterials, numCdMaterials, pHdr->cdtextureindex, pHdr->numcdtextures, 0);
+
+	INDEX_STORE_32(hwGroups, numHwGroups, (offsetof(r5::studiohdr_v14_t, groupHeaderOffset) + pHdr->groupHeaderOffset), pHdr->groupHeaderCount, 0);
+	INDEX_STORE_32(lods, numLODs, (offsetof(r5::studiohdr_v14_t, lodOffset) + pHdr->lodOffset), pHdr->lodCount, 0);
+	INDEX_STORE_32(bodyparts, numBodyparts, pHdr->bodypartindex, pHdr->numbodyparts, 0);
+
+	numBoneStates = pHdr->boneStateCount;
+	if (numBoneStates)
+	{
+		boneStates = pHdr->pBoneStates();
+	}
+	else
+	{
+		boneStates = s_DefaultBoneStates_256;
+	}
+
+	INDEX_STORE_32(localSequences, numLocalSequences, pHdr->localseqindex, pHdr->numlocalseq, 0);
+	INDEX_STORE_32(localNodeNames, numLocalNodes, pHdr->localnodenameindex, pHdr->numlocalnodes, 0);
+	INDEX_STORE_32(poseParams, numPoseParm, pHdr->localposeparamindex, pHdr->numlocalposeparameters, 0);
+	INDEX_STORE_32(ikChains, numIkChains, pHdr->ikchainindex, pHdr->numikchains, 0);
+	INDEX_STORE_32(ikLocks, numIkLocks, pHdr->localikautoplaylockindex, pHdr->numlocalikautoplaylocks, 0);
+	INDEX_STORE_32(includeModels, numIncludeModels, pHdr->includemodelindex, pHdr->numincludemodels, 0);
+
+	if (pHdr->bvhOffset)
+	{
+		bvhData = reinterpret_cast<const char* const>(pHdr) + pHdr->bvhOffset;
+	}
+};
+
+ModelParsedData_t::ModelParsedData_t(const r5::studiohdr_v16_t* const pHdr, const AssetVersion_t& fileVersion, const int dataSizePhys, const int dataSizeModel) :
+	baseptr(reinterpret_cast<const char* const>(pHdr)), version(fileVersion), flags(pHdr->flags), length(dataSizeModel), name(pHdr->pszName()), mass(pHdr->mass), contents(pHdr->contents),
+
+	// bone
+	linearBone(nullptr), bones(nullptr), numBones(0), srcBoneTransforms(nullptr), numSrcBoneTransforms(0), attachments(nullptr), numAttachments(0), hitboxSets(nullptr), numHitboxSets(0),
+
+	// animation
+	localSequences(nullptr), numLocalSequences(0), externalSequences(nullptr), numExternalSequences(0), externalIncludeModels(nullptr), numExternalIncludeModels(0), includeModels(nullptr), numIncludeModels(0),
+	localNodeNames(nullptr), numLocalNodes(0), poseParams(nullptr), numPoseParm(0), ikChains(nullptr), numIkChains(0), ikLocks(nullptr), numIkLocks(0),
+
+	// material
+	materials(nullptr), numMaterials(0), skins(nullptr), numSkins(0), cdMaterials(nullptr), numCdMaterials(0),
+
+	// misc
+	surfaceProp(pHdr->pszSurfaceProp()), keyValues(pHdr->KeyValueText()), keyValueSize(-1), constdirectionallightdot(0), rootLOD(0), numAllowedRootLODs(0),
+	fadeDistance(pHdr->fadeDistance), gatherSize(pHdr->gatherSize), illumpositionattachmentindex(pHdr->illumpositionattachmentindex), flMaxEyeDeflection(0.0f),
+
+	// file
+	vtxOffset(-1), vvdOffset(-1), vvcOffset(-1), vvwOffset(-1), phyOffset(0),
+	vtxSize(-1), vvdSize(-1), vvcSize(-1), vvwSize(-1), phySize(dataSizePhys), hwDataSize(0),
+
+	// lod
+	hwGroups(nullptr), numHwGroups(0), lods(nullptr), numLODs(0), boneStates(nullptr), numBoneStates(0), bodyparts(nullptr), numBodyparts(0),
+
+	// collision
+	bvhData(nullptr)
+{
+	INDEX_STORE_16(bones, numBones, pHdr->boneHdrOffset, pHdr->boneCount, 0);
+	INDEX_STORE_16(bones, numBones, pHdr->boneDataOffset, pHdr->boneCount, 1);
+
+	if (pHdr->linearboneindex)
+	{
+		linearBone = reinterpret_cast<const char* const>(baseptr) + FIX_OFFSET(pHdr->linearboneindex);
+	}
+
+	if (pHdr->numsrcbonetransform)
+	{
+		numSrcBoneTransforms = pHdr->numsrcbonetransform;
+		srcBoneTransforms = pHdr->SrcBoneTransform(0);
+	}
+
+	INDEX_STORE_16(attachments, numAttachments, pHdr->localattachmentindex, pHdr->numlocalattachments, 0);
+	INDEX_STORE_16(hitboxSets, numHitboxSets, pHdr->hitboxsetindex, pHdr->numhitboxsets, 0);
+
+
+	INDEX_STORE_16(materials, numMaterials, pHdr->textureindex, pHdr->numtextures, 0);
+	INDEX_STORE_16(skins, numSkins, pHdr->skinindex, pHdr->numskinfamilies, 0);
+	// no cd materials
+
+	INDEX_STORE_16_OFS(hwGroups, numHwGroups, pHdr->groupHeaderOffset, offsetof(r5::studiohdr_v16_t, groupHeaderOffset), pHdr->groupHeaderCount, 0);
+	INDEX_STORE_16_OFS(lods, numLODs, pHdr->lodOffset, offsetof(r5::studiohdr_v16_t, lodOffset), pHdr->lodCount, 0);
+	INDEX_STORE_16(bodyparts, numBodyparts, pHdr->bodypartindex, pHdr->numbodyparts, 0);
+
+	numBoneStates = pHdr->boneStateCount;
+	if (numBoneStates)
+	{
+		boneStates = pHdr->pBoneStates();
+	}
+	else
+	{
+		boneStates = s_DefaultBoneStates_256;
+	}
+
+	INDEX_STORE_16(localSequences, numLocalSequences, pHdr->localseqindex, pHdr->numlocalseq, 0);
+	INDEX_STORE_16(localNodeNames, numLocalNodes, pHdr->localnodenameindex, pHdr->numlocalnodes, 0);
+	INDEX_STORE_16(poseParams, numPoseParm, pHdr->localposeparamindex, pHdr->numlocalposeparameters, 0);
+	INDEX_STORE_16(ikChains, numIkChains, pHdr->ikchainindex, pHdr->numikchains, 0);
+	// ik locks g0ne
+	// include models g0ne
+
+	if (pHdr->bvhOffset)
+	{
+		bvhData = reinterpret_cast<const char* const>(pHdr) + FIX_OFFSET(pHdr->bvhOffset);
+	}
+};
+
+ModelParsedData_t::ModelParsedData_t(const r5::studiohdr_v17_t* const pHdr, const AssetVersion_t& fileVersion, const int dataSizePhys, const int dataSizeModel) :
+	baseptr(reinterpret_cast<const char* const>(pHdr)), version(fileVersion), flags(pHdr->flags), length(dataSizeModel), name(pHdr->pszName()), mass(pHdr->mass), contents(pHdr->contents),
+
+	// bone
+	linearBone(nullptr), bones(nullptr), numBones(0), srcBoneTransforms(nullptr), numSrcBoneTransforms(0), attachments(nullptr), numAttachments(0), hitboxSets(nullptr), numHitboxSets(0),
+
+	// animation
+	localSequences(nullptr), numLocalSequences(0), externalSequences(nullptr), numExternalSequences(0), externalIncludeModels(nullptr), numExternalIncludeModels(0), includeModels(nullptr), numIncludeModels(0),
+	localNodeNames(nullptr), numLocalNodes(0), poseParams(nullptr), numPoseParm(0), ikChains(nullptr), numIkChains(0), ikLocks(nullptr), numIkLocks(0),
+
+	// material
+	materials(nullptr), numMaterials(0), skins(nullptr), numSkins(0), cdMaterials(nullptr), numCdMaterials(0),
+
+	// misc
+	surfaceProp(pHdr->pszSurfaceProp()), keyValues(pHdr->KeyValueText()), keyValueSize(-1), constdirectionallightdot(0), rootLOD(0), numAllowedRootLODs(0),
+	fadeDistance(pHdr->fadeDistance), gatherSize(pHdr->gatherSize), illumpositionattachmentindex(pHdr->illumpositionattachmentindex), flMaxEyeDeflection(0.0f),
+
+	// file
+	vtxOffset(-1), vvdOffset(-1), vvcOffset(-1), vvwOffset(-1), phyOffset(0),
+	vtxSize(-1), vvdSize(-1), vvcSize(-1), vvwSize(-1), phySize(dataSizePhys), hwDataSize(0),
+
+	// lod
+	hwGroups(nullptr), numHwGroups(0), lods(nullptr), numLODs(0), boneStates(nullptr), numBoneStates(0), bodyparts(nullptr), numBodyparts(0),
+
+	// collision
+	bvhData(nullptr)
+{
+	INDEX_STORE_16(bones, numBones, pHdr->boneHdrOffset, pHdr->boneCount, 0);
+	INDEX_STORE_16(bones, numBones, pHdr->boneDataOffset, pHdr->boneCount, 1);
+
+	if (pHdr->linearboneindex)
+	{
+		linearBone = reinterpret_cast<const char* const>(baseptr) + FIX_OFFSET(pHdr->linearboneindex);
+	}
+
+	if (pHdr->numsrcbonetransform)
+	{
+		numSrcBoneTransforms = pHdr->numsrcbonetransform;
+		srcBoneTransforms = pHdr->SrcBoneTransform(0);
+	}
+
+	INDEX_STORE_16(attachments, numAttachments, pHdr->localattachmentindex, pHdr->numlocalattachments, 0);
+	INDEX_STORE_16(hitboxSets, numHitboxSets, pHdr->hitboxsetindex, pHdr->numhitboxsets, 0);
+
+
+	INDEX_STORE_16(materials, numMaterials, pHdr->textureindex, pHdr->numtextures, 0);
+	INDEX_STORE_16(skins, numSkins, pHdr->skinindex, pHdr->numskinfamilies, 0);
+	// no cd materials
+
+	INDEX_STORE_16_OFS(hwGroups, numHwGroups, pHdr->groupHeaderOffset, offsetof(r5::studiohdr_v17_t, groupHeaderOffset), pHdr->groupHeaderCount, 0);
+	INDEX_STORE_16_OFS(lods, numLODs, pHdr->lodOffset, offsetof(r5::studiohdr_v17_t, lodOffset), pHdr->lodCount, 0);
+	INDEX_STORE_16(bodyparts, numBodyparts, pHdr->bodypartindex, pHdr->numbodyparts, 0);
+
+	numBoneStates = pHdr->boneStateCount;
+	if (numBoneStates)
+	{
+		boneStates = pHdr->pBoneStates();
+	}
+	else
+	{
+		boneStates = s_DefaultBoneStates_256;
+	}
+
+	INDEX_STORE_16(localSequences, numLocalSequences, pHdr->localseqindex, pHdr->numlocalseq, 0);
+	INDEX_STORE_16(localNodeNames, numLocalNodes, pHdr->localnodenameindex, pHdr->numlocalnodes, 0);
+	INDEX_STORE_16(poseParams, numPoseParm, pHdr->localposeparamindex, pHdr->numlocalposeparameters, 0);
+	INDEX_STORE_16(ikChains, numIkChains, pHdr->ikchainindex, pHdr->numikchains, 0);
+	// ik locks g0ne
+	// include models g0ne
+
+	if (pHdr->bvhOffset)
+	{
+		bvhData = reinterpret_cast<const char* const>(pHdr) + FIX_OFFSET(pHdr->bvhOffset);
+	}
+};
+
+ModelParsedData_t::ModelParsedData_t(const r5::studiohdr_v19_2_t* const pHdr, const AssetVersion_t& fileVersion, const int dataSizePhys, const int dataSizeModel) :
+	baseptr(reinterpret_cast<const char* const>(pHdr)), version(fileVersion), flags(pHdr->flags), length(dataSizeModel), name(pHdr->pszName()), mass(pHdr->mass), contents(pHdr->contents),
+
+	// bone
+	linearBone(nullptr), bones(nullptr), numBones(0), srcBoneTransforms(nullptr), numSrcBoneTransforms(0), attachments(nullptr), numAttachments(0), hitboxSets(nullptr), numHitboxSets(0),
+
+	// animation
+	localSequences(nullptr), numLocalSequences(0), externalSequences(nullptr), numExternalSequences(0), externalIncludeModels(nullptr), numExternalIncludeModels(0), includeModels(nullptr), numIncludeModels(0),
+	localNodeNames(nullptr), numLocalNodes(0), poseParams(nullptr), numPoseParm(0), ikChains(nullptr), numIkChains(0), ikLocks(nullptr), numIkLocks(0),
+
+	// material
+	materials(nullptr), numMaterials(0), skins(nullptr), numSkins(0), cdMaterials(nullptr), numCdMaterials(0),
+
+	// misc
+	surfaceProp(pHdr->pszSurfaceProp()), keyValues(pHdr->KeyValueText()), keyValueSize(-1), constdirectionallightdot(0), rootLOD(0), numAllowedRootLODs(0),
+	fadeDistance(pHdr->fadeDistance), gatherSize(pHdr->gatherSize), illumpositionattachmentindex(pHdr->illumpositionattachmentindex), flMaxEyeDeflection(0.0f),
+
+	// file
+	vtxOffset(-1), vvdOffset(-1), vvcOffset(-1), vvwOffset(-1), phyOffset(0),
+	vtxSize(-1), vvdSize(-1), vvcSize(-1), vvwSize(-1), phySize(dataSizePhys), hwDataSize(0),
+
+	// lod
+	hwGroups(nullptr), numHwGroups(0), lods(nullptr), numLODs(0), boneStates(nullptr), numBoneStates(0), bodyparts(nullptr), numBodyparts(0),
+
+	// collision
+	bvhData(nullptr)
+{
+	INDEX_STORE_16(bones, numBones, pHdr->boneHdrOffset, pHdr->boneCount, 0);
+	INDEX_STORE_16(bones, numBones, pHdr->boneDataOffset, pHdr->boneCount, 1);
+
+	if (pHdr->linearboneindex)
+	{
+		linearBone = reinterpret_cast<const char* const>(baseptr) + FIX_OFFSET(pHdr->linearboneindex);
+	}
+
+	if (pHdr->numsrcbonetransform)
+	{
+		numSrcBoneTransforms = pHdr->numsrcbonetransform;
+		srcBoneTransforms = pHdr->SrcBoneTransform(0);
+	}
+
+	INDEX_STORE_16(attachments, numAttachments, pHdr->localattachmentindex, pHdr->numlocalattachments, 0);
+	INDEX_STORE_16(hitboxSets, numHitboxSets, pHdr->hitboxsetindex, pHdr->numhitboxsets, 0);
+
+
+	INDEX_STORE_16(materials, numMaterials, pHdr->textureindex, pHdr->numtextures, 0);
+	INDEX_STORE_16(skins, numSkins, pHdr->skinindex, pHdr->numskinfamilies, 0);
+	// no cd materials
+
+	INDEX_STORE_16_OFS(hwGroups, numHwGroups, pHdr->groupHeaderOffset, offsetof(r5::studiohdr_v19_2_t, groupHeaderOffset), pHdr->groupHeaderCount, 0);
+	INDEX_STORE_16_OFS(lods, numLODs, pHdr->lodOffset, offsetof(r5::studiohdr_v19_2_t, lodOffset), pHdr->lodCount, 0);
+	INDEX_STORE_16(bodyparts, numBodyparts, pHdr->bodypartindex, pHdr->numbodyparts, 0);
+
+	numBoneStates = pHdr->boneStateCount;
+	if (numBoneStates)
+	{
+		boneStates = pHdr->pBoneStates();
+	}
+	else
+	{
+		boneStates = s_DefaultBoneStates_1024;
+	}
+
+	INDEX_STORE_16(localSequences, numLocalSequences, pHdr->localseqindex, pHdr->numlocalseq, 0);
+	INDEX_STORE_16(localNodeNames, numLocalNodes, pHdr->localnodenameindex, pHdr->numlocalnodes, 0);
+	INDEX_STORE_16(poseParams, numPoseParm, pHdr->localposeparamindex, pHdr->numlocalposeparameters, 0);
+	INDEX_STORE_16(ikChains, numIkChains, pHdr->ikchainindex, pHdr->numikchains, 0);
+	// ik locks g0ne
+	// include models g0ne
+
+	if (pHdr->bvhOffset)
+	{
+		bvhData = reinterpret_cast<const char* const>(pHdr) + FIX_OFFSET(pHdr->bvhOffset);
+	}
+};
 
 // bones
-void ParseModelBoneData_v8(ModelParsedData_t* const parsedData)
+void ModelParsedData_t::ParseModelBoneData_v16()
 {
-	const studiohdr_generic_t* const pStudioHdr = parsedData->pStudioHdr();
-
-	const r5::mstudiobone_v8_t* const bones = reinterpret_cast<const r5::mstudiobone_v8_t* const>(pStudioHdr->pBones());
-	parsedData->bones.resize(pStudioHdr->boneCount);
-
-	for (int i = 0; i < pStudioHdr->boneCount; i++)
+	if (numBones == 0)
 	{
-		parsedData->bones.at(i) = ModelBone_t(&bones[i]);
+		INDEX_TO_NULL(bones);
+
+		return;
+	}
+
+	const r5::mstudiobonehdr_v16_t* const pBoneHdr = reinterpret_cast<const r5::mstudiobonehdr_v16_t* const>(baseptr + INDEX_GET(bones, 0));
+	const r5::mstudiobonedata_v16_t* const pBoneData = reinterpret_cast<const r5::mstudiobonedata_v16_t* const>(baseptr + INDEX_GET(bones, 1));
+
+	INDEX_TO_PTR(bones, numBones, ModelBone_t);
+
+	for (uint16_t i = 0; i < numBones; i++)
+	{
+		bones[i] = ModelBone_t(pBoneHdr + i, pBoneData + i);
 	}
 }
 
-void ParseModelBoneData_v12_1(ModelParsedData_t* const parsedData)
+void ModelParsedData_t::ParseModelBoneData_v19()
 {
-	const studiohdr_generic_t* const pStudioHdr = parsedData->pStudioHdr();
-
-	const r5::mstudiobone_v12_1_t* const bones = reinterpret_cast<const r5::mstudiobone_v12_1_t* const>(pStudioHdr->pBones());
-	parsedData->bones.resize(pStudioHdr->boneCount);
-
-	for (int i = 0; i < pStudioHdr->boneCount; i++)
+	if (numBones == 0)
 	{
-		parsedData->bones.at(i) = ModelBone_t(&bones[i]);
+		INDEX_TO_NULL(bones);
+
+		return;
+	}
+
+	const r5::mstudiobonehdr_v16_t* const pBoneHdr = reinterpret_cast<const r5::mstudiobonehdr_v16_t* const>(baseptr + INDEX_GET(bones, 0));
+	const r5::mstudiobonedata_v19_t* const pBoneData = reinterpret_cast<const r5::mstudiobonedata_v19_t* const>(baseptr + INDEX_GET(bones, 1));
+	const r5::mstudiolinearbone_v19_t* const pLinearBone = reinterpret_cast<const r5::mstudiolinearbone_v19_t* const>(linearBone);
+
+	INDEX_TO_PTR(bones, numBones, ModelBone_t);
+
+	for (uint16_t i = 0; i < numBones; i++)
+	{
+		bones[i] = ModelBone_t(pBoneHdr + i, pBoneData + i, pLinearBone, i);
 	}
 }
 
-void ParseModelBoneData_v16(ModelParsedData_t* const parsedData)
+void ModelParsedData_t::ParseModelHitboxData_v16()
 {
-	const studiohdr_generic_t* const pStudioHdr = parsedData->pStudioHdr();
-
-	const r5::mstudiobonehdr_v16_t* const bonehdrs = reinterpret_cast<const r5::mstudiobonehdr_v16_t* const>(pStudioHdr->pBones());
-	const r5::mstudiobonedata_v16_t* const bonedata = reinterpret_cast<const r5::mstudiobonedata_v16_t* const>(pStudioHdr->pBoneData());
-
-	parsedData->bones.resize(pStudioHdr->boneCount);
-
-	for (int i = 0; i < pStudioHdr->boneCount; i++)
-		parsedData->bones.at(i) = ModelBone_t(&bonehdrs[i], &bonedata[i]);
-}
-
-void ParseModelBoneData_v19(ModelParsedData_t* const parsedData)
-{
-	const studiohdr_generic_t* const pStudioHdr = parsedData->pStudioHdr();
-
-	const r5::mstudiobonehdr_v16_t* const bonehdrs = reinterpret_cast<const r5::mstudiobonehdr_v16_t* const>(pStudioHdr->pBones());
-	const r5::mstudiobonedata_v19_t* const bonedata = reinterpret_cast<const r5::mstudiobonedata_v19_t* const>(pStudioHdr->pBoneData());
-	const r5::mstudiolinearbone_v19_t* const linearbone = reinterpret_cast<const r5::mstudiolinearbone_v19_t* const>(pStudioHdr->pLinearBone());
-
-	parsedData->bones.resize(pStudioHdr->boneCount);
-
-	for (int i = 0; i < pStudioHdr->boneCount; i++)
-		parsedData->bones.at(i) = ModelBone_t(&bonehdrs[i], &bonedata[i], linearbone, i);
-}
-
-void ParseModelAttachmentData_v8(ModelParsedData_t* const parsedData)
-{
-	const studiohdr_generic_t* const pStudioHdr = parsedData->pStudioHdr();
-	const r5::mstudioattachment_v8_t* const pAttachments = reinterpret_cast<const r5::mstudioattachment_v8_t* const>(pStudioHdr->baseptr + pStudioHdr->localAttachmentOffset);
-
-	parsedData->attachments.reserve(pStudioHdr->localAttachmentCount);
-
-	for (int i = 0; i < pStudioHdr->localAttachmentCount; i++)
+	if (numHitboxSets == 0)
 	{
-		parsedData->attachments.emplace_back(pAttachments + i);
+		INDEX_TO_NULL(hitboxSets);
+
+		return;
+	}
+
+	const r5::mstudiohitboxset_v16_t* const pHitboxSets = reinterpret_cast<const r5::mstudiohitboxset_v16_t* const>(baseptr + INDEX_GET(hitboxSets, 0));
+
+	INDEX_TO_PTR(hitboxSets, numHitboxSets, ModelHitboxSet_t);
+
+	for (int i = 0; i < numHitboxSets; i++)
+	{
+		hitboxSets[i] = ModelHitboxSet_t(pHitboxSets + i);
 	}
 }
 
-void ParseModelAttachmentData_v16(ModelParsedData_t* const parsedData)
+// materials
+void ModelParsedData_t::ParseModelTextureData_v8()
 {
-	const studiohdr_generic_t* const pStudioHdr = parsedData->pStudioHdr();
-	const r5::mstudioattachment_v16_t* const pAttachments = reinterpret_cast<const r5::mstudioattachment_v16_t* const>(pStudioHdr->baseptr + pStudioHdr->localAttachmentOffset);
-
-	parsedData->attachments.reserve(pStudioHdr->localAttachmentCount);
-
-	for (int i = 0; i < pStudioHdr->localAttachmentCount; i++)
+	if (numMaterials == 0)
 	{
-		parsedData->attachments.emplace_back(pAttachments + i);
+		INDEX_TO_NULL(materials);
+		INDEX_TO_NULL(skins);
+		INDEX_TO_NULL(cdMaterials);
+
+		return;
+	}
+
+	const r5::mstudiotexture_v8_t* const pTextures = reinterpret_cast<const r5::mstudiotexture_v8_t* const>(baseptr + INDEX_GET(materials, 0));
+
+	INDEX_TO_PTR(materials, numMaterials, ModelMaterialData_t);
+
+	for (int i = 0; i < numMaterials; i++)
+	{
+		ModelMaterialData_t* const pMaterial = materials + i;
+		const r5::mstudiotexture_v8_t* const texture = pTextures + i;
+
+		pMaterial->SetName(texture->pszName());
+		pMaterial->guid = texture->texture;
+
+		// not possible to have vmt materials
+		if (texture->texture != 0)
+		{
+			pMaterial->asset = g_assetData.FindAssetByGUID<CPakAsset>(texture->texture);
+		}
+	}
+
+	const int skinindex = INDEX_GET(skins, 0);
+
+	INDEX_TO_PTR(skins, numSkins, ModelSkinData_t);
+
+	for (int i = 0; i < numSkins; i++)
+	{
+		skins[i] = ModelSkinData_t(pSkinName<int>(i, skinindex), pSkinFamily(i, skinindex));
+	}
+
+	if (numCdMaterials)
+	{
+		const int* const cdMaterialIndices = reinterpret_cast<const int* const>(baseptr + INDEX_GET(cdMaterials, 0));
+		INDEX_TO_PTR(cdMaterials, numCdMaterials, const char*);
+
+		for (int i = 0; i < numCdMaterials; i++)
+		{
+			cdMaterials[i] = baseptr + cdMaterialIndices[i];
+		}
+	}
+	else
+	{
+		INDEX_TO_NULL(cdMaterials);
 	}
 }
 
-void ParseModelHitboxData_v8(ModelParsedData_t* const parsedData)
+void ModelParsedData_t::ParseModelTextureData_v16()
 {
-	const studiohdr_generic_t* const pStudioHdr = parsedData->pStudioHdr();
-	const mstudiohitboxset_t* const pHitboxSets = reinterpret_cast<const mstudiohitboxset_t* const>(pStudioHdr->baseptr + pStudioHdr->hitboxSetOffset);
-
-	parsedData->hitboxsets.reserve(pStudioHdr->hitboxSetCount);
-
-	for (int i = 0; i < pStudioHdr->hitboxSetCount; i++)
+	if (numMaterials == 0)
 	{
-		parsedData->hitboxsets.emplace_back(pHitboxSets + i, pHitboxSets->pHitbox<r5::mstudiobbox_v8_t>(0));
+		INDEX_TO_NULL(materials);
+		INDEX_TO_NULL(skins);
+
+		return;
+	}
+
+	const uint64_t* const pTextures = reinterpret_cast<const uint64_t* const>(baseptr + INDEX_GET(materials, 0));
+
+	INDEX_TO_PTR(materials, numMaterials, ModelMaterialData_t);
+
+	char namebuf[16]{};
+
+	for (int i = 0; i < numMaterials; i++)
+	{
+		ModelMaterialData_t* const pMaterial = materials + i;
+		const uint64_t texture = pTextures[i];
+
+		snprintf(namebuf, 16, "0x%llX", texture);
+		pMaterial->StoreName(namebuf);
+		pMaterial->guid = texture;
+
+		// not possible to have vmt materials
+		pMaterial->asset = g_assetData.FindAssetByGUID<CPakAsset>(texture);
+	}
+
+	const int skinindex = INDEX_GET(skins, 0);
+
+	INDEX_TO_PTR(skins, numSkins, ModelSkinData_t);
+
+	for (int i = 0; i < numSkins; i++)
+	{
+		skins[i] = ModelSkinData_t(pSkinName<uint16_t>(i, skinindex), pSkinFamily(i, skinindex));
 	}
 }
 
-void ParseModelHitboxData_v16(ModelParsedData_t* const parsedData)
+// vertex
+void ModelParsedData_t::GetHWBuffer(char* const dcmpBuf, const char* const hwBuf, const int groupIndex)
 {
-	const studiohdr_generic_t* const pStudioHdr = parsedData->pStudioHdr();
-	const r5::mstudiohitboxset_v16_t* const pHitboxSets = reinterpret_cast<const r5::mstudiohitboxset_v16_t* const>(pStudioHdr->baseptr + pStudioHdr->hitboxSetOffset);
+	const ModelHWGroup_t* const pLODGroup = hwGroups + groupIndex;
+	hwDataSize += pLODGroup->dataSizeDecompressed; // add to get the total decompressed size
 
-	parsedData->hitboxsets.reserve(pStudioHdr->hitboxSetCount);
-
-	for (int i = 0; i < pStudioHdr->hitboxSetCount; i++)
+	// decompress buffer
+	switch (pLODGroup->dataCompression)
 	{
-		parsedData->hitboxsets.emplace_back(pHitboxSets + i);
+	case eCompressionType::NONE:
+	{
+		std::memcpy(dcmpBuf, reinterpret_cast<const char* const>(hwBuf) + pLODGroup->dataOffset, pLODGroup->dataSizeDecompressed);
+		break;
 	}
+	case eCompressionType::PAKFILE:
+	case eCompressionType::SNOWFLAKE:
+	case eCompressionType::OODLE:
+	{
+		const char* const cmpBuf = reinterpret_cast<const char* const>(hwBuf) + pLODGroup->dataOffset;
+
+		uint64_t dataSizeDecompressed = pLODGroup->dataSizeDecompressed; // this is cringe, can't  be const either, so awesome
+		RTech::DecompressStreamedBuffer(cmpBuf, dcmpBuf, dataSizeDecompressed, pLODGroup->dataCompression);
+
+		break;
+	}
+	default:
+	{
+		assertm(false, "invalid compression");
+		break;
+	}
+	}
+}
+
+void ModelParsedData_t::ParseMeshData_VTX(ModelMeshData_t* const pMeshData, Vertex_t* const parseVertices, Vector2D* const parseTexcoords, uint16_t* const parseIndices, VertexWeight_t* const parseWeights, char* const meshBuffer)
+{																			
+	CMeshData* parsedVertexData = reinterpret_cast<CMeshData*>(meshBuffer);
+	parsedVertexData->InitWriter();											
+
+	// add mesh data
+	parsedVertexData->AddIndices(parseIndices, pMeshData->indexCount);
+	parsedVertexData->AddVertices(parseVertices, pMeshData->vertCount);
+
+	if (pMeshData->texcoordCount > 1)
+		parsedVertexData->AddTexcoords(parseTexcoords, pMeshData->vertCount * (pMeshData->texcoordCount - 1));
+
+	parsedVertexData->AddWeights(parseWeights, pMeshData->weightsCount);
+
+	// remove it from usage
+	parsedVertexData->DestroyWriter();
+
+	pMeshData->meshVertexDataIndex = meshVertexData.size();
+	meshVertexData.addBack(reinterpret_cast<char*>(parsedVertexData), parsedVertexData->GetSize());
+}
+
+void ModelParsedData_t::ParseHWVertices(ModelMeshData_t* const pMeshData, char* const meshParseBuffer, const char* const vertexData, const vvw::mstudioboneweightextra_t* const extraWeightData, const uint16_t* const indiceData, const int material, const uint8_t vertexParseFlags)
+{
+	CMeshData* parsedVertexData = reinterpret_cast<CMeshData*>(meshParseBuffer);
+	parsedVertexData->InitWriter();
+
+#if (ADVANCED_MODEL_PREVIEW)
+	pMeshData->rawVertexData = new char[pMeshData->vertCacheSize * pMeshData->vertCount]; // get a pointer to the raw vertex data for use with the game's shaders
+
+	memcpy(pMeshData->rawVertexData, vertexData, static_cast<uint64_t>(pMeshData->vertCacheSize) * pMeshData->vertCount);
+#endif
+
+	parsedVertexData->AddIndices(indiceData, pMeshData->indexCount);
+	parsedVertexData->AddVertices(nullptr, pMeshData->vertCount);
+
+	if (pMeshData->texcoordCount > 1)
+		parsedVertexData->AddTexcoords(nullptr, pMeshData->vertCount * (pMeshData->texcoordCount - 1));
+
+	parsedVertexData->AddWeights(nullptr, 0);
+
+	int weightIdx = 0;
+	for (unsigned int vertIdx = 0; vertIdx < pMeshData->vertCount; ++vertIdx)
+	{
+		const char* const hwVertexData = vertexData + (vertIdx * pMeshData->vertCacheSize);
+		Vector2D* const texcoords = pMeshData->texcoordCount > 1 ? &parsedVertexData->GetTexcoords()[vertIdx * (pMeshData->texcoordCount - 1)] : nullptr;
+		Vertex_t::ParseVertexFromVG(&parsedVertexData->GetVertices()[vertIdx], &parsedVertexData->GetWeights()[weightIdx], texcoords, pMeshData, hwVertexData, boneStates, extraWeightData, vertexParseFlags, weightIdx);
+	}
+	pMeshData->weightsCount = weightIdx;
+	parsedVertexData->AddWeights(nullptr, pMeshData->weightsCount);
+
+	pMeshData->ParseMaterial(this, material);
+
+	// remove it from usage
+	parsedVertexData->DestroyWriter();
+
+	pMeshData->meshVertexDataIndex = meshVertexData.size();
+	meshVertexData.addBack(reinterpret_cast<char*>(parsedVertexData), parsedVertexData->GetSize());
+}
+
+void ModelParsedData_t::ParseModelVertexData_v9(const char* const vertexData)
+{
+	const vg::rev1::VertexGroupHeader_t* const vgHdr = reinterpret_cast<const vg::rev1::VertexGroupHeader_t*>(vertexData);
+	hwDataSize = vgHdr->dataSize; // [rika]: set here, makes things easier. if we use the value from ModelAssetHeader it will be aligned 4096, making it slightly oversized.
+
+	numLODs = static_cast<int>(vgHdr->lodCount);
+
+	if (numLODs == 0 || numBodyparts == 0)
+	{
+		assertm(false, "model without LODs");
+
+		INDEX_TO_NULL(hwGroups);
+		INDEX_TO_NULL(lods);
+		INDEX_TO_NULL(bodyparts);
+
+		return;
+	}
+
+	// group setup
+	{
+		numHwGroups = 1;
+		hwGroups = new ModelHWGroup_t[1]{};
+
+		hwGroups->dataOffset = 0;
+		hwGroups->dataSizeCompressed = -1;
+		hwGroups->dataSizeDecompressed = vgHdr->dataSize;
+		hwGroups->dataCompression = eCompressionType::NONE;
+
+		hwGroups->lodIndex = 0;
+		hwGroups->lodCount = static_cast<uint8_t>(vgHdr->lodCount);
+		hwGroups->lodMap = 0xff >> (8 - vgHdr->lodCount);
+	}
+
+	const mstudiobodyparts_t* const pBodyparts = reinterpret_cast<const mstudiobodyparts_t* const>(baseptr + INDEX_GET(bodyparts, 0));
+
+	INDEX_TO_PTR(bodyparts, numBodyparts, ModelBodyPart_t);
+
+	uint32_t numModels = 0u;
+
+	for (int i = 0; i < numBodyparts; i++)
+	{
+		const mstudiobodyparts_t* const pBodypart = pBodyparts + i;
+
+		bodyparts[i] = ModelBodyPart_t(pBodypart->pszName(), numModels, pBodypart->nummodels);
+
+		numModels += bodyparts[i].numModels;
+	}
+
+	INDEX_TO_PTR(lods, numLODs, ModelLODData_t);
+
+	CManagedBuffer* const meshBuffer = g_BufferManager.ClaimBuffer();
+
+	numBoneStates = static_cast<int>(vgHdr->boneStateChangeCount);
+	boneStates = vgHdr->boneStateChangeCount ? vgHdr->pBoneMap() : s_DefaultBoneStates_256; // does this model have remapped bones? use default map if not
+
+	// tells some details about the model for later vertex processing
+	const uint8_t vertexParseFlags = ((flags & STUDIOHDR_FLAGS_USES_EXTRA_BONE_WEIGHTS) ? VERT_PARSE_EXTRAWEIGHT : 0x0);
+
+	for (uint16_t lodLevel = 0; lodLevel < numLODs; lodLevel++)
+	{
+		const vg::rev1::ModelLODHeader_t* const pLOD = vgHdr->pLOD(lodLevel);
+		ModelLODData_t* const pLODData = lods + lodLevel;
+
+		pLODData->ParseLOD_HW1(pLOD, numModels, vgHdr);
+
+		uint32_t currentMeshIndex = 0u;
+
+		// parse models via bodyparts
+		for (int bodypartIdx = 0; bodypartIdx < numBodyparts; bodypartIdx++)
+		{
+			const mstudiobodyparts_t* const pBodypart = pBodyparts + bodypartIdx; // [rika]: messy but do what you got to
+			const ModelBodyPart_t& bodypart = bodyparts[bodypartIdx];
+
+			for (int modelIdx = 0; modelIdx < pBodypart->nummodels; modelIdx++)
+			{
+				const r5::mstudiomodel_v8_t* const pStudioModel = pBodypart->pModel<r5::mstudiomodel_v8_t>(modelIdx);
+				ModelModelData_t* const pModel = pLODData->models + (bodypart.modelIndex + modelIdx);
+
+				*pModel = ModelModelData_t(pLODData->meshes + currentMeshIndex, pStudioModel->nummeshes);
+				pModel->GenerateName(pBodypart->pszName(), modelIdx, lodLevel);
+
+				for (int meshIdx = 0; meshIdx < pStudioModel->nummeshes; ++meshIdx)
+				{
+					const r5::mstudiomesh_v8_t* const pStudioMesh = pStudioModel->pMesh(meshIdx);
+					const vg::rev1::MeshHeader_t* const pLODMesh = pLOD->pMesh(vgHdr, static_cast<uint8_t>(pStudioMesh->meshid));
+
+					if (pLODMesh->flags == 0)
+					{
+						pModel->meshCount--; // this mesh was skipped so remove it from our total
+						continue;
+					}
+
+					CMeshData* parsedVertexData = reinterpret_cast<CMeshData*>(meshBuffer->Buffer());
+					parsedVertexData->InitWriter();
+
+					ModelMeshData_t* const pMeshData = pLODData->meshes + currentMeshIndex;
+					pMeshData->ParseMesh_HW1(pLODMesh, bodypartIdx, vgHdr);
+
+					ParseHWVertices(pMeshData, meshBuffer->Buffer(), pLODMesh->pVertices(vgHdr), pLODMesh->pBoneWeights(vgHdr), pLODMesh->pIndices(vgHdr), pStudioMesh->material, vertexParseFlags);
+
+					pModel->vertCount += pMeshData->vertCount;
+
+					// for export
+					pLODData->weightsPerVert = pMeshData->weightsPerVert > pLODData->weightsPerVert ? pMeshData->weightsPerVert : pLODData->weightsPerVert;
+					pLODData->texcoordsPerVert = pMeshData->texcoordCount > pLODData->texcoordsPerVert ? pMeshData->texcoordCount : pLODData->texcoordsPerVert;
+
+					pLODData->vertexCount += pLODMesh->vertCount;
+					pLODData->indexCount += pLODMesh->indexCount;
+
+					// remove it from usage
+					parsedVertexData->DestroyWriter();
+
+					currentMeshIndex++;
+				}
+			}
+		}
+	}
+
+	g_BufferManager.RelieveBuffer(meshBuffer);
+}
+
+void ModelParsedData_t::ParseModelVertexData_v12_1(const char* const vertexData)
+{
+	if (numLODs == 0 || numBodyparts == 0)
+	{
+		assertm(false, "model without LODs");
+
+		INDEX_TO_NULL(hwGroups);
+		INDEX_TO_NULL(lods);
+		INDEX_TO_NULL(bodyparts);
+
+		return;
+	}
+
+	const r5::studio_hw_groupdata_v12_1_t* const pLODGroups = reinterpret_cast<const r5::studio_hw_groupdata_v12_1_t* const>(baseptr + INDEX_GET(hwGroups, 0));
+	
+	INDEX_TO_PTR(hwGroups, numHwGroups, ModelHWGroup_t);
+
+	for (int i = 0; i < numHwGroups; i++)
+	{
+		hwGroups[i] = ModelHWGroup_t(pLODGroups + i);
+	}
+
+	const mstudiobodyparts_t* const pBodyparts = reinterpret_cast<const mstudiobodyparts_t* const>(baseptr + INDEX_GET(bodyparts, 0));
+
+	INDEX_TO_PTR(bodyparts, numBodyparts, ModelBodyPart_t);
+
+	uint32_t numModels = 0u;
+
+	for (int i = 0; i < numBodyparts; i++)
+	{
+		const mstudiobodyparts_t* const pBodypart = pBodyparts + i;
+
+		bodyparts[i] = ModelBodyPart_t(pBodypart->pszName(), numModels, pBodypart->nummodels);
+
+		numModels += bodyparts[i].numModels;
+	}
+
+	INDEX_TO_PTR(lods, numLODs, ModelLODData_t);
+
+	CManagedBuffer* const lodBuffer = g_BufferManager.ClaimBuffer();
+	CManagedBuffer* const meshBuffer = g_BufferManager.ClaimBuffer();
+
+	// tells some details about the model for later vertex processing
+	const uint8_t vertexParseFlags = ((flags & STUDIOHDR_FLAGS_USES_EXTRA_BONE_WEIGHTS) ? VERT_PARSE_EXTRAWEIGHT : 0x0);
+
+	for (int groupIdx = 0; groupIdx < numHwGroups; groupIdx++)
+	{
+		GetHWBuffer(lodBuffer->Buffer(), vertexData, groupIdx);
+
+		const vg::rev2::VertexGroupHeader_t* const pGroupHdr = reinterpret_cast<const vg::rev2::VertexGroupHeader_t* const>(lodBuffer->Buffer());
+
+		uint8_t lodIdx = 0;
+		for (int lodLevel = 0; lodLevel < numLODs; lodLevel++)
+		{
+			if (lodIdx == pGroupHdr->lodCount)
+				break;
+
+			// does this group contian this lod
+			if ((pGroupHdr->lodMap & (1 << lodLevel)) == 0)
+				continue;
+
+			assert(lodIdx < pGroupHdr->lodCount);
+
+			const vg::rev2::ModelLODHeader_t* pLOD = pGroupHdr->pLod(lodIdx);
+			ModelLODData_t* const pLODData = lods + lodLevel;
+
+			pLODData->ParseLOD_HW2(pLOD, numModels);
+
+			uint32_t currentMeshIndex = 0u;
+
+			// parse models via bodyparts
+			for (int bodypartIdx = 0; bodypartIdx < numBodyparts; bodypartIdx++)
+			{
+				const mstudiobodyparts_t* const pBodypart = pBodyparts + bodypartIdx; // [rika]: messy but do what you got to
+				const ModelBodyPart_t& bodypart = bodyparts[bodypartIdx];
+
+				for (int modelIdx = 0; modelIdx < pBodypart->nummodels; modelIdx++)
+				{
+					const r5::mstudiomodel_v12_1_t* const pStudioModel = pBodypart->pModel<r5::mstudiomodel_v12_1_t>(modelIdx);
+					ModelModelData_t* const pModel = pLODData->models + (bodypart.modelIndex + modelIdx);
+
+					*pModel = ModelModelData_t(pLODData->meshes + currentMeshIndex, pStudioModel->nummeshes);
+					pModel->GenerateName(pBodypart->pszName(), modelIdx, lodLevel);
+
+					for (int meshIdx = 0; meshIdx < pStudioModel->nummeshes; ++meshIdx)
+					{
+						const r5::mstudiomesh_v12_1_t* const pStudioMesh = pStudioModel->pMesh(meshIdx);
+						const vg::rev2::MeshHeader_t* const pLODMesh = pLOD->pMesh(static_cast<uint8_t>(pStudioMesh->meshid));
+
+						if (pLODMesh->flags == 0)
+						{
+							pModel->meshCount--; // this mesh was skipped so remove it from our total
+							continue;
+						}
+
+						CMeshData* parsedVertexData = reinterpret_cast<CMeshData*>(meshBuffer->Buffer());
+						parsedVertexData->InitWriter();
+
+						ModelMeshData_t* const pMeshData = pLODData->meshes + currentMeshIndex;
+						pMeshData->ParseMesh_HW2(pLODMesh, bodypartIdx);
+
+						ParseHWVertices(pMeshData, meshBuffer->Buffer(), pLODMesh->pVertices(), pLODMesh->pBoneWeights(), pLODMesh->pIndices(), pStudioMesh->material, vertexParseFlags);
+
+						pModel->vertCount += pMeshData->vertCount;
+
+						// for export
+						pLODData->weightsPerVert = pMeshData->weightsPerVert > pLODData->weightsPerVert ? pMeshData->weightsPerVert : pLODData->weightsPerVert;
+						pLODData->texcoordsPerVert = pMeshData->texcoordCount > pLODData->texcoordsPerVert ? pMeshData->texcoordCount : pLODData->texcoordsPerVert;
+
+						pLODData->vertexCount += pLODMesh->vertCount;
+						pLODData->indexCount += static_cast<uint32_t>(pLODMesh->indexCount);
+
+						// remove it from usage
+						parsedVertexData->DestroyWriter();
+
+						currentMeshIndex++;
+					}
+				}
+			}
+
+			lodIdx++;
+		}
+	}
+
+	g_BufferManager.RelieveBuffer(lodBuffer);
+	g_BufferManager.RelieveBuffer(meshBuffer);
+}
+
+void ModelParsedData_t::ParseModelVertexData_v14(const char* const vertexData)
+{
+	if (numLODs == 0 || numBodyparts == 0)
+	{
+		assertm(false, "model without LODs");
+
+		INDEX_TO_NULL(hwGroups);
+		INDEX_TO_NULL(lods);
+		INDEX_TO_NULL(bodyparts);
+
+		return;
+	}
+
+	const r5::studio_hw_groupdata_v12_1_t* const pLODGroups = reinterpret_cast<const r5::studio_hw_groupdata_v12_1_t* const>(baseptr + INDEX_GET(hwGroups, 0));
+	
+	INDEX_TO_PTR(hwGroups, numHwGroups, ModelHWGroup_t);
+
+	for (int i = 0; i < numHwGroups; i++)
+	{
+		hwGroups[i] = ModelHWGroup_t(pLODGroups + i);
+	}
+
+
+	const void* const pBodyparts = reinterpret_cast<const void* const>(baseptr + INDEX_GET(bodyparts, 0));
+
+	INDEX_TO_PTR(bodyparts, numBodyparts, ModelBodyPart_t);
+
+	uint32_t numModels = 0u;
+
+	// [rika]: v15 is quriky and has a new mstudiobodyparts_t
+	switch (version.majorVer)
+	{
+	case 14:
+	{
+		for (int i = 0; i < numBodyparts; i++)
+		{
+			const mstudiobodyparts_t* const pBodypart = reinterpret_cast<const mstudiobodyparts_t* const>(pBodyparts) + i;
+
+			bodyparts[i] = ModelBodyPart_t(pBodypart->pszName(), numModels, pBodypart->nummodels);
+
+			numModels += bodyparts[i].numModels;
+		}
+
+		break;
+	}
+	case 15:
+	{
+		for (int i = 0; i < numBodyparts; i++)
+		{
+			const r5::mstudiobodyparts_v15_t* const pBodypart = reinterpret_cast<const r5::mstudiobodyparts_v15_t* const>(pBodyparts) + i;
+
+			bodyparts[i] = ModelBodyPart_t(pBodypart->pszName(), numModels, pBodypart->nummodels);
+
+			numModels += bodyparts[i].numModels;
+		}
+
+		break;
+	}
+	default:
+	{
+		assertm(false, "invalid version for this func");
+		break;
+	}
+	}
+
+	INDEX_TO_PTR(lods, numLODs, ModelLODData_t);
+
+	CManagedBuffer* const lodBuffer = g_BufferManager.ClaimBuffer();
+	CManagedBuffer* const meshBuffer = g_BufferManager.ClaimBuffer();
+
+	// tells some details about the model for later vertex processing
+	const uint8_t vertexParseFlags = ((flags & STUDIOHDR_FLAGS_USES_EXTRA_BONE_WEIGHTS) ? VERT_PARSE_EXTRAWEIGHT : 0x0);
+
+	for (int groupIdx = 0; groupIdx < numHwGroups; groupIdx++)
+	{
+		GetHWBuffer(lodBuffer->Buffer(), vertexData, groupIdx);
+
+		const vg::rev3::VertexGroupHeader_t* const pGroupHdr = reinterpret_cast<const vg::rev3::VertexGroupHeader_t* const>(lodBuffer->Buffer());
+
+		uint8_t lodIdx = 0;
+		for (int lodLevel = 0; lodLevel < numLODs; lodLevel++)
+		{
+			if (lodIdx == pGroupHdr->lodCount)
+				break;
+
+			// does this group contian this lod
+			if ((pGroupHdr->lodMap & (1 << lodLevel)) == 0)
+				continue;
+
+			assert(lodIdx < pGroupHdr->lodCount);
+
+			const vg::rev3::ModelLODHeader_t* pLOD = pGroupHdr->pLod(lodIdx);
+			ModelLODData_t* const pLODData = lods + lodLevel;
+
+			pLODData->ParseLOD_HW3(pLOD, numModels);
+
+			uint32_t currentMeshIndex = 0u;
+
+			// parse models via bodyparts
+			for (int bodypartIdx = 0; bodypartIdx < numBodyparts; bodypartIdx++)
+			{
+				const mstudiobodyparts_t* const pBodypart = version.majorVer == 15 ? reinterpret_cast<const r5::mstudiobodyparts_v15_t* const>(pBodyparts)[bodypartIdx].AsV8() : (reinterpret_cast<const mstudiobodyparts_t* const>(pBodyparts) + bodypartIdx); // [rika]: messy but do what you got to
+				const ModelBodyPart_t& bodypart = bodyparts[bodypartIdx];
+
+				for (int modelIdx = 0; modelIdx < pBodypart->nummodels; modelIdx++)
+				{
+					const r5::mstudiomodel_v14_t* const pStudioModel = pBodypart->pModel<r5::mstudiomodel_v14_t>(modelIdx);
+					ModelModelData_t* const pModel = pLODData->models + (bodypart.modelIndex + modelIdx);
+
+					*pModel = ModelModelData_t(pLODData->meshes + currentMeshIndex, pStudioModel->meshCountBase);
+					pModel->GenerateName(pBodypart->pszName(), modelIdx, lodLevel);
+
+					for (int meshIdx = 0; meshIdx < pStudioModel->meshCountTotal; ++meshIdx)
+					{
+						// we do not handle blendstates currently
+						if (meshIdx == pStudioModel->meshCountBase)
+							break;
+
+						const r5::mstudiomesh_v14_t* const pStudioMesh = pStudioModel->pMesh(meshIdx);
+						const vg::rev3::MeshHeader_t* const pLODMesh = pLOD->pMesh(static_cast<uint8_t>(pStudioMesh->meshid));
+
+						if (pLODMesh->flags == 0)
+						{
+							pModel->meshCount--; // this mesh was skipped so remove it from our total
+							continue;
+						}
+
+						CMeshData* parsedVertexData = reinterpret_cast<CMeshData*>(meshBuffer->Buffer());
+						parsedVertexData->InitWriter();
+
+						ModelMeshData_t* const pMeshData = pLODData->meshes + currentMeshIndex;
+						pMeshData->ParseMesh_HW3(pLODMesh, bodypartIdx);
+
+						ParseHWVertices(pMeshData, meshBuffer->Buffer(), pLODMesh->pVertices(), pLODMesh->pBoneWeights(), pLODMesh->pIndices(), pStudioMesh->material, vertexParseFlags);
+
+						pModel->vertCount += pMeshData->vertCount;
+
+						// for export
+						pLODData->weightsPerVert = pMeshData->weightsPerVert > pLODData->weightsPerVert ? pMeshData->weightsPerVert : pLODData->weightsPerVert;
+						pLODData->texcoordsPerVert = pMeshData->texcoordCount > pLODData->texcoordsPerVert ? pMeshData->texcoordCount : pLODData->texcoordsPerVert;
+
+						pLODData->vertexCount += pLODMesh->vertCount;
+						pLODData->indexCount += static_cast<uint32_t>(pLODMesh->indexCount);
+
+						// remove it from usage
+						parsedVertexData->DestroyWriter();
+
+						currentMeshIndex++;
+					}
+				}
+			}
+
+			lodIdx++;
+		}
+	}
+
+	g_BufferManager.RelieveBuffer(lodBuffer);
+	g_BufferManager.RelieveBuffer(meshBuffer);
+}
+
+void ModelParsedData_t::ParseModelVertexData_v16(const char* const vertexData, const uint8_t parseFlags)
+{
+	if (numLODs == 0 || numBodyparts == 0)
+	{
+		assertm(false, "model without LODs");
+
+		INDEX_TO_NULL(hwGroups);
+		INDEX_TO_NULL(lods);
+		INDEX_TO_NULL(bodyparts);
+
+		return;
+	}
+
+	const r5::studio_hw_groupdata_v16_t* const pLODGroups = reinterpret_cast<const r5::studio_hw_groupdata_v16_t* const>(baseptr + INDEX_GET(hwGroups, 0));
+	
+	INDEX_TO_PTR(hwGroups, numHwGroups, ModelHWGroup_t);
+
+	for (int i = 0; i < numHwGroups; i++)
+	{
+		hwGroups[i] = ModelHWGroup_t(pLODGroups + i);
+	}
+
+	const r5::mstudiobodyparts_v16_t* const pBodyparts = reinterpret_cast<const r5::mstudiobodyparts_v16_t* const>(baseptr + INDEX_GET(bodyparts, 0));
+
+	INDEX_TO_PTR(bodyparts, numBodyparts, ModelBodyPart_t);
+
+	uint32_t numModels = 0u;
+
+	for (uint16_t i = 0; i < numBodyparts; i++)
+	{
+		const r5::mstudiobodyparts_v16_t* const pBodypart = pBodyparts + i;
+
+		bodyparts[i] = ModelBodyPart_t(pBodypart->pszName(), numModels, pBodypart->nummodels);
+
+		numModels += bodyparts[i].numModels;
+	}
+
+	const float* const pLODThresholds = reinterpret_cast<const float* const>(baseptr + INDEX_GET(lods, 0));
+
+	INDEX_TO_PTR(lods, numLODs, ModelLODData_t);
+
+	CManagedBuffer* const lodBuffer = g_BufferManager.ClaimBuffer();
+	CManagedBuffer* const meshBuffer = g_BufferManager.ClaimBuffer();
+
+	// tells some details about the model for later vertex processing
+	const uint8_t vertexParseFlags = ((flags & STUDIOHDR_FLAGS_USES_EXTRA_BONE_WEIGHTS) ? VERT_PARSE_EXTRAWEIGHT : 0x0) | parseFlags;
+
+	for (uint16_t groupIdx = 0; groupIdx < numHwGroups; groupIdx++)
+	{
+		GetHWBuffer(lodBuffer->Buffer(), vertexData, groupIdx);
+
+		const vg::rev4::VertexGroupHeader_t* const pGroupHdr = reinterpret_cast<const vg::rev4::VertexGroupHeader_t* const>(lodBuffer->Buffer());
+
+		uint8_t lodIdx = 0;
+		for (uint16_t lodLevel = 0; lodLevel < numLODs; lodLevel++)
+		{
+			if (lodIdx == pGroupHdr->lodCount)
+				break;
+
+			// does this group contian this lod
+			if ((pGroupHdr->lodMap & (1 << lodLevel)) == 0)
+				continue;
+
+			assert(lodIdx < pGroupHdr->lodCount);
+
+			const vg::rev4::ModelLODHeader_t* pLOD = pGroupHdr->pLod(lodIdx);
+			ModelLODData_t* const pLODData = lods + lodLevel;
+
+			pLODData->ParseLOD_HW4(pLOD, pLODThresholds[lodLevel], numModels);
+
+			uint32_t currentMeshIndex = 0u;
+
+			// parse models via bodyparts
+			for (uint16_t bodypartIdx = 0; bodypartIdx < numBodyparts; bodypartIdx++)
+			{
+				const r5::mstudiobodyparts_v16_t* const pBodypart = pBodyparts + bodypartIdx;
+				const ModelBodyPart_t& bodypart = bodyparts[bodypartIdx];
+
+				for (uint16_t modelIdx = 0; modelIdx < pBodypart->nummodels; modelIdx++)
+				{
+					const r5::mstudiomodel_v16_t* const pStudioModel = pBodypart->pModel(modelIdx);
+					ModelModelData_t* const pModel = pLODData->models + (bodypart.modelIndex + modelIdx);
+
+					*pModel = ModelModelData_t(pLODData->meshes + currentMeshIndex, pStudioModel->meshCountBase);
+					pModel->GenerateName(pBodypart->pszName(), modelIdx, lodLevel);
+
+					for (uint16_t meshIdx = 0; meshIdx < pStudioModel->meshCountTotal; ++meshIdx)
+					{
+						// we do not handle blendstates currently
+						if (meshIdx == pStudioModel->meshCountBase)
+							break;
+
+						const r5::mstudiomesh_v16_t* const pStudioMesh = pStudioModel->pMesh(meshIdx);
+						const vg::rev4::MeshHeader_t* const pLODMesh = pLOD->pMesh(static_cast<uint8_t>(pStudioMesh->meshid));
+
+						if (pLODMesh->flags == 0)
+						{
+							pModel->meshCount--; // this mesh was skipped so remove it from our total
+							continue;
+						}
+
+						CMeshData* parsedVertexData = reinterpret_cast<CMeshData*>(meshBuffer->Buffer());
+						parsedVertexData->InitWriter();
+
+						ModelMeshData_t* const pMeshData = pLODData->meshes + currentMeshIndex;
+						pMeshData->ParseMesh_HW4(pLODMesh, bodypartIdx);
+
+						ParseHWVertices(pMeshData, meshBuffer->Buffer(), pLODMesh->pVertices(), pLODMesh->pBoneWeights(), pLODMesh->pIndices(), pStudioMesh->material, vertexParseFlags);
+
+						pModel->vertCount += pMeshData->vertCount;
+
+						// for export
+						pLODData->weightsPerVert = pMeshData->weightsPerVert > pLODData->weightsPerVert ? pMeshData->weightsPerVert : pLODData->weightsPerVert;
+						pLODData->texcoordsPerVert = pMeshData->texcoordCount > pLODData->texcoordsPerVert ? pMeshData->texcoordCount : pLODData->texcoordsPerVert;
+
+						pLODData->vertexCount += pLODMesh->vertCount;
+						pLODData->indexCount += pLODMesh->indexCount;
+
+						// remove it from usage
+						parsedVertexData->DestroyWriter();
+
+						currentMeshIndex++;
+					}
+				}
+			}
+
+			lodIdx++;
+		}
+	}
+
+	g_BufferManager.RelieveBuffer(lodBuffer);
+	g_BufferManager.RelieveBuffer(meshBuffer);
+}
+
+// anim
+void ModelParsedData_t::ParseModelAnimTypes_V8()
+{
+	if (numIkChains > 0)
+	{
+		const r5::mstudioikchain_v8_t* const pIKChains = reinterpret_cast<const r5::mstudioikchain_v8_t* const>(baseptr + INDEX_GET(ikChains, 0));
+		INDEX_TO_PTR(ikChains, numIkChains, ModelIKChain_t);
+
+		for (int i = 0; i < numIkChains; i++)
+		{
+			const ModelIKChain_t ikchain(pIKChains + i);
+			memcpy_s(ikChains + i, sizeof(ModelIKChain_t), &ikchain, sizeof(ModelIKChain_t));
+		}
+	}
+	else
+	{
+		INDEX_TO_NULL(ikChains);
+	}
+
+	if (numPoseParm > 0)
+	{
+		const mstudioposeparamdesc_t* const pPoseParams = reinterpret_cast<const mstudioposeparamdesc_t* const>(baseptr + INDEX_GET(poseParams, 0));
+		INDEX_TO_PTR(poseParams, numPoseParm, ModelPoseParam_t);
+
+		for (int i = 0; i < numPoseParm; i++)
+		{
+			const ModelPoseParam_t poseparam(pPoseParams + i);
+			memcpy_s(poseParams + i, sizeof(ModelPoseParam_t), &poseparam, sizeof(ModelPoseParam_t));
+		}
+	}
+	else
+	{
+		INDEX_TO_NULL(poseParams);
+	}
+
+	if (numLocalNodes > 0)
+	{
+		const int localNodeNameIndex = INDEX_GET(localNodeNames, 0);
+		const int* const nodeNameIndices = reinterpret_cast<const int* const>(baseptr + localNodeNameIndex);
+		INDEX_TO_PTR(localNodeNames, numLocalNodes, const char*);
+
+		if (version.majorVer < 14 || (version.majorVer == 14 && version.minorVer == 0))
+		{
+			for (int i = 0; i < numLocalNodes; i++)
+			{
+				localNodeNames[i] = baseptr + nodeNameIndices[i];
+			}
+		}
+		else
+		{
+			for (int i = 0; i < numLocalNodes; i++)
+			{
+				localNodeNames[i] = reinterpret_cast<const char* const>(nodeNameIndices) + nodeNameIndices[i];
+			}
+		}		
+	}
+	else
+	{
+		INDEX_TO_NULL(localNodeNames);
+	}
+
+	// technically supported but never used
+	if (numIkLocks > 0)
+	{
+		//printf("wooowowww~~!! iklocks in: %s\n", pStudioHdr->pszName());
+
+		const r5::mstudioiklock_v8_t* const pIKLocks = reinterpret_cast<const r5::mstudioiklock_v8_t* const>(baseptr + INDEX_GET(ikLocks, 0));
+		INDEX_TO_PTR(ikLocks, numIkLocks, ModelIKLock_t);
+
+		for (int i = 0; i < numIkLocks; i++)
+		{
+			const ModelIKLock_t iklock(pIKLocks + i);
+			memcpy_s(ikLocks + i, sizeof(ModelIKLock_t), &iklock, sizeof(ModelIKLock_t));
+		}
+	}
+	else
+	{
+		INDEX_TO_NULL(ikLocks);
+	}
+}
+
+void ModelParsedData_t::ParseModelAnimTypes_V16()
+{
+	if (numIkChains > 0)
+	{
+		const r5::mstudioikchain_v16_t* const pIKChains = reinterpret_cast<const r5::mstudioikchain_v16_t* const>(baseptr + INDEX_GET(ikChains, 0));
+		INDEX_TO_PTR(ikChains, numIkChains, ModelIKChain_t);
+
+		for (int i = 0; i < numIkChains; i++)
+		{
+			const ModelIKChain_t ikchain(pIKChains + i);
+			memcpy_s(ikChains + i, sizeof(ModelIKChain_t), &ikchain, sizeof(ModelIKChain_t));
+		}
+	}
+	else
+	{
+		INDEX_TO_NULL(ikChains);
+	}
+
+	if (numPoseParm > 0)
+	{
+		const r5::mstudioposeparamdesc_v16_t* const pPoseParams = reinterpret_cast<const r5::mstudioposeparamdesc_v16_t* const>(baseptr + INDEX_GET(poseParams, 0));
+		INDEX_TO_PTR(poseParams, numPoseParm, ModelPoseParam_t);
+
+		for (int i = 0; i < numPoseParm; i++)
+		{
+			const ModelPoseParam_t poseparam(pPoseParams + i);
+			memcpy_s(poseParams + i, sizeof(ModelPoseParam_t), &poseparam, sizeof(ModelPoseParam_t));
+		}
+	}
+	else
+	{
+		INDEX_TO_NULL(poseParams);
+	}
+
+	if (numLocalNodes > 0)
+	{
+		const uint16_t* const nodeNameIndices = reinterpret_cast<const uint16_t* const>(baseptr + INDEX_GET(localNodeNames, 0));
+		INDEX_TO_PTR(localNodeNames, numLocalNodes, const char*);
+
+		for (int i = 0; i < numLocalNodes; i++)
+		{
+			localNodeNames[i] = reinterpret_cast<const char* const>(nodeNameIndices) + FIX_OFFSET(nodeNameIndices[i]);
+		}
+	}
+	else
+	{
+		INDEX_TO_NULL(localNodeNames);
+	}
+
+	// no global iklocks in v16 and later	
 }
 
 void CreateBuffersForModelHitboxes(ModelParsedData_t* const parsedData, CDXDrawData* const drawData)
@@ -566,8 +2099,10 @@ void CreateBuffersForModelHitboxes(ModelParsedData_t* const parsedData, CDXDrawD
 	CShader* vertexShader = g_dxHandler->GetShaderManager()->LoadShaderFromString("shaders/model_vs", s_PreviewVertexShader, eShaderType::Vertex);;
 	CShader* pixelShader = g_dxHandler->GetShaderManager()->LoadShaderFromString("shaders/model_ps", s_PreviewPixelShader, eShaderType::Pixel);
 
-	for (auto& hitboxSet : parsedData->hitboxsets)
+	for (int setIdx = 0u; setIdx < parsedData->numHitboxSets; setIdx++)
 	{
+		const ModelHitboxSet_t& hitboxSet = parsedData->hitboxSets[setIdx];
+
 		for (int i = 0; i < hitboxSet.numHitboxes; ++i)
 		{
 			const ModelHitbox_t& h = hitboxSet.hitboxes[i];
@@ -622,7 +2157,7 @@ void CreateBuffersForModelHitboxes(ModelParsedData_t* const parsedData, CDXDrawD
 			meshDrawData.inputLayout = vertexShader->GetInputLayout();
 			meshDrawData.hasGameShaders = false;
 
-			if (!meshDrawData.vertexBuffer)
+			if (!meshDrawData.buffers.vertexBuffer)
 			{
 				constexpr UINT vertStride = sizeof(Vertex_t);
 
@@ -636,13 +2171,13 @@ void CreateBuffersForModelHitboxes(ModelParsedData_t* const parsedData, CDXDrawD
 
 				D3D11_SUBRESOURCE_DATA srd{ vertices.data() };
 
-				if (FAILED(g_dxHandler->GetDevice()->CreateBuffer(&desc, &srd, &meshDrawData.vertexBuffer)))
+				if (FAILED(g_dxHandler->GetDevice()->CreateBuffer(&desc, &srd, &meshDrawData.buffers.vertexBuffer)))
 					return;
 
 				meshDrawData.vertexStride = vertStride;
 			}
 
-			if (!meshDrawData.indexBuffer)
+			if (!meshDrawData.buffers.indexBuffer)
 			{
 				D3D11_BUFFER_DESC desc = {};
 
@@ -653,7 +2188,7 @@ void CreateBuffersForModelHitboxes(ModelParsedData_t* const parsedData, CDXDrawD
 				desc.MiscFlags = 0;
 
 				D3D11_SUBRESOURCE_DATA srd = { indices.data()};
-				if (FAILED(g_dxHandler->GetDevice()->CreateBuffer(&desc, &srd, &meshDrawData.indexBuffer)))
+				if (FAILED(g_dxHandler->GetDevice()->CreateBuffer(&desc, &srd, &meshDrawData.buffers.indexBuffer)))
 					return;
 
 				meshDrawData.numIndices = indices.size();
@@ -665,9 +2200,10 @@ void CreateBuffersForModelHitboxes(ModelParsedData_t* const parsedData, CDXDrawD
 void CreateBuffersForModelDrawData(ModelParsedData_t* const parsedData, CDXDrawData* const drawData, const uint64_t lod)
 {
 	// [rika]: eventually parse through models
-	for (size_t i = 0; i < parsedData->lods.at(lod).meshes.size(); ++i)
+	const ModelLODData_t* const pLOD = parsedData->pLOD(lod);
+	for (uint32_t i = 0; i < pLOD->GetMeshCount(); ++i)
 	{
-		const ModelMeshData_t& mesh = parsedData->lods.at(lod).meshes.at(i);
+		const ModelMeshData_t& mesh = pLOD->Mesh(i);
 		DXMeshDrawData_t* const meshDrawData = &drawData->meshBuffers[i];
 
 		meshDrawData->visible = true;
@@ -686,7 +2222,7 @@ void CreateBuffersForModelDrawData(ModelParsedData_t* const parsedData, CDXDrawD
 		std::unique_ptr<char[]> parsedVertexDataBuf = parsedData->meshVertexData.getIdx(mesh.meshVertexDataIndex);
 		const CMeshData* const parsedVertexData = reinterpret_cast<CMeshData*>(parsedVertexDataBuf.get());
 
-		if (!meshDrawData->vertexBuffer)
+		if (!meshDrawData->buffers.vertexBuffer)
 		{
 			constexpr UINT vertStride = sizeof(Vertex_t);
 
@@ -702,13 +2238,13 @@ void CreateBuffersForModelDrawData(ModelParsedData_t* const parsedData, CDXDrawD
 
 			D3D11_SUBRESOURCE_DATA srd{ vertexData };
 
-			if (FAILED(g_dxHandler->GetDevice()->CreateBuffer(&desc, &srd, &meshDrawData->vertexBuffer)))
+			if (FAILED(g_dxHandler->GetDevice()->CreateBuffer(&desc, &srd, &meshDrawData->buffers.vertexBuffer)))
 				return;
 
 			meshDrawData->vertexStride = vertStride;
 		}
 
-		if (!meshDrawData->indexBuffer)
+		if (!meshDrawData->buffers.indexBuffer)
 		{
 			D3D11_BUFFER_DESC desc = {};
 
@@ -719,7 +2255,7 @@ void CreateBuffersForModelDrawData(ModelParsedData_t* const parsedData, CDXDrawD
 			desc.MiscFlags = 0;
 
 			D3D11_SUBRESOURCE_DATA srd = { parsedVertexData->GetIndices() };
-			if (FAILED(g_dxHandler->GetDevice()->CreateBuffer(&desc, &srd, &meshDrawData->indexBuffer)))
+			if (FAILED(g_dxHandler->GetDevice()->CreateBuffer(&desc, &srd, &meshDrawData->buffers.indexBuffer)))
 				return;
 
 			meshDrawData->numIndices = mesh.indexCount;
@@ -931,19 +2467,20 @@ struct ModelMaterialExport_t
 	MaterialAsset* asset;
 	int id;
 };
+typedef std::unordered_map<int, ModelMaterialExport_t> ModelMaterialExportMap_t;
 
 // export materials from parsed data
-void HandleModelMaterials(const ModelParsedData_t* const parsedData, std::unordered_map<int, ModelMaterialExport_t>& materials, const std::filesystem::path& exportPath)
+void HandleModelMaterials(const ModelParsedData_t* const parsedData, ModelMaterialExportMap_t& materials, const std::filesystem::path& exportPath)
 {
 	// [rika]: this will decide if we want textures/materials local to the model, or to use full paths in the future.
 	const bool useFullPaths = false; // temp
 
 	// [rika]: make sure materials are empty
 	materials.clear();
-	materials.reserve(parsedData->materials.size());
+	materials.reserve(parsedData->numMaterials);
 
 	// [rika]: pick a skin !
-	if (g_rsxSettings.exportModelSkin && g_rsxSettings.previewedSkinIndex >= static_cast<int>(parsedData->skins.size()))
+	if (g_rsxSettings.exportModelSkin && g_rsxSettings.previewedSkinIndex >= static_cast<uint32_t>(parsedData->numSkins))
 	{
 		assertm(false, "skin index out of range");
 		g_rsxSettings.previewedSkinIndex = 0;
@@ -951,13 +2488,16 @@ void HandleModelMaterials(const ModelParsedData_t* const parsedData, std::unorde
 
 	const int skin = g_rsxSettings.exportModelSkin ? g_rsxSettings.previewedSkinIndex : 0;
 
-	const ModelSkinData_t* const skinData = &parsedData->skins.at(skin);
+	const ModelSkinData_t* const skinData = &parsedData->skins[skin];
 
 	// [rika]: we don't need to cycle through all the LODs here, any used mesh should be in the top LOD and cannot change per LOD
 	// this gets the data we need to export materials, and set them properly in meshes later
 	// keep track of the materials that are actually used by meshes, so we don't export unneeded ones (speeds up export)
-	for (const ModelMeshData_t& mesh : parsedData->lods.front().meshes)
+	const ModelLODData_t* const pLOD0 = parsedData->pLOD(0);
+	for (uint32_t meshIdx = 0u; meshIdx < pLOD0->GetMeshCount(); meshIdx++)
 	{
+		const ModelMeshData_t& mesh = pLOD0->Mesh(meshIdx);
+
 		// [rika]: no vertices, this mesh will not be exported.
 		if (!mesh.vertCount)
 			continue;
@@ -1015,429 +2555,516 @@ void HandleModelMaterials(const ModelParsedData_t* const parsedData, std::unorde
 	g_pImGuiHandler->FinishProgressBarEvent(materialExportProgress);
 }
 
-// [rika]: todo also fix this up
-// export parsed data to rmax
-bool ExportModelRMAX(const ModelParsedData_t* const parsedData, std::filesystem::path& exportPath)
+void* ExportModelSetupCAST(const ModelParsedData_t* const parsedData, const char* const filePath, const char* const fileStem)
 {
-	std::string fileNameBase = exportPath.stem().string();
-	const std::filesystem::path filePath(exportPath.parent_path());
+	cast::CastExporter* const cast = new cast::CastExporter(filePath, fileStem, RTech::StringToGuid(parsedData->name));
 
-	rmax::RMAXExporter rmaxFile(filePath, fileNameBase.c_str(), fileNameBase.c_str());
+	// [rika]: build the skeleton once, and reuse it
+	cast::CastNode* const skeleton = new cast::CastNode(cast::CastId::Skeleton, RTech::StringToGuid(fileStem));
+	{
+		const size_t boneCount = parsedData->BoneCount();
+		skeleton->ReserveChildren(boneCount);
 
-	// do bones
-	rmaxFile.ReserveBones(parsedData->bones.size());
-	for (auto& bone : parsedData->bones)
-		rmaxFile.AddBone(bone.name, bone.parent, bone.pos, bone.quat, bone.scale);
+		// uses hashes for lookup, still gets bone parents by index :clown:
+		for (int i = 0; i < boneCount; i++)
+		{
+			const ModelBone_t* const boneData = parsedData->pBone(i);
+
+			cast::CastNodeBone boneNode(skeleton);
+			boneNode.MakeBone(boneData->name, boneData->parent, &boneData->pos, &boneData->quat, false);
+		}
+	}
+	cast->SetSkeleton(skeleton);
 
 	// [rika]: model is skin and bones, no meat
-	if (parsedData->lods.size() == 0)
+	if (parsedData->LODCount() == 0)
 	{
-		const std::string tmpName(std::format("{}.rmax", fileNameBase));
-		rmaxFile.SetName(tmpName.c_str());
+		// cast
+		cast::CastNode* const rootNode = cast->GetChild(0); // we only have one root node, no hash
+		cast::CastNode* const modelNode = rootNode->AddChild(cast::CastId::Model, cast->GetGUID());
 
-		rmaxFile.ToFile();
+		// [rika]: utilize the pre parsed skeleton
+		modelNode->AddChild(cast->GetSkeleton());
 
-		return true;
+		cast->ToFile();
 	}
 
-	const std::filesystem::path texturePath(std::format("{}/{}", filePath.string(), fileNameBase)); // todo, remove duplicate code
-	std::unordered_map<int, ModelMaterialExport_t> materials;
-	HandleModelMaterials(parsedData, materials, texturePath);
+	return cast;
+}
 
-	// [rika]: now we parse lods
-	for (size_t lodIdx = 0; lodIdx < parsedData->lods.size(); lodIdx++)
+void* ExportModelSetupRMAX(const ModelParsedData_t* const parsedData, const char* const filePath, const char* const fileStem)
+{
+	rmax::RMAXExporter* const rmax = new rmax::RMAXExporter(filePath, fileStem, fileStem);
+
+	// do bones
+	rmax->ReserveBones(parsedData->BoneCount());
+	for (int i = 0; i < parsedData->BoneCount(); i++)
 	{
-		const ModelLODData_t& lodData = parsedData->lods.at(lodIdx);
+		const ModelBone_t* const pBone = parsedData->pBone(i);
+		rmax->AddBone(pBone->name, pBone->parent, pBone->pos, pBone->quat, pBone->scale);
+	}
 
-		const std::string tmpName = std::format("{}_LOD{}.rmax", fileNameBase, lodIdx);
-		rmaxFile.SetName(tmpName.c_str());		
+	// [rika]: model is skin and bones, no meat
+	if (parsedData->LODCount() == 0)
+	{
+		rmax->SetName(fileStem);
+		rmax->ToFile();
+	}
 
-		// do materials
-		rmaxFile.ReserveMaterials(parsedData->materials.size());
-		for (size_t matIdx = 0; matIdx < parsedData->materials.size(); matIdx++)
+	return rmax;
+}
+
+void* ExportModelSetupSMD(const ModelParsedData_t* const parsedData, const char* const filePath, const char* const fileStem)
+{
+	smd::CStudioModelData* const smd = new smd::CStudioModelData(filePath, parsedData->BoneCount(), 1ull);
+
+	// [rika]: initialize the nodes, and in this case the frames since we should only have one
+	for (int i = 0; i < parsedData->BoneCount(); i++)
+	{
+		const ModelBone_t* const pBone = parsedData->pBone(i);
+		const int ibone = static_cast<int>(i);
+
+		smd->InitNode(pBone->name, ibone, pBone->parent);
+		smd->InitFrameBone(0, ibone, pBone->pos, pBone->rot);
+	}
+
+	// [rika]: model is skin and bones, no meat
+	if (parsedData->LODCount() == 0)
+	{
+		smd->SetName(fileStem);
+		smd->Write();
+	}
+
+	return smd;
+}
+
+// [rika]: figure out and store how much data is needed for each model
+struct ModelExportInfo_t
+{
+	ModelExportInfo_t(const ModelModelData_t* const models, const int numModels) : numVertices(0u), numIndices(0u), numMeshes(0u), texcoordsPerVert(0u), weightsPerVert(0u)
+	{
+		for (int i = 0; i < numModels; i++)
 		{
-			const ModelMaterialData_t& materialData = parsedData->materials.at(matIdx);
-			const int materialId = static_cast<int>(matIdx);
+			const ModelModelData_t* const pModel = models + i;
 
-			// [rika]: if it's unloaded, or unused we will just write a stub material
-			if (!materialData.asset)
+			for (int j = 0; j < pModel->meshCount; j++)
 			{
-				rmaxFile.AddMaterial(materialData.name);
-				continue;
-			}
+				const ModelMeshData_t* const pMesh = pModel->meshes + j;
 
-			assert(materialData.GetMaterialAsset());
-			const MaterialAsset* const matlAsset = materialData.GetMaterialAsset();
-			rmaxFile.AddMaterial(matlAsset->name);
-
-			// [rika]: write stub material (unused material)
-			if (!materials.contains(materialId) || !matlAsset->resourceBindings.size())
-				continue;
-
-			const ModelMaterialExport_t& materialExport = materials.find(materialId)->second;
-
-			rmax::RMAXMaterial* const matl = rmaxFile.GetMaterialLast();
-
-			for (const TextureAssetEntry_t& entry : matlAsset->txtrAssets)
-			{
-				// [rika]: we don't have a resource binding or we don't have a name for the texture
-				if (!matlAsset->resourceBindings.count(entry.index) || !materialExport.textures.contains(entry.index))
+				if (pMesh->vertCount == 0)
 					continue;
 
-				const std::string resource = matlAsset->resourceBindings.find(entry.index)->second.name;
+				numVertices += pMesh->vertCount;
+				numIndices += pMesh->indexCount;
+				numMeshes++;
 
-				// [rika]: do we need this resource?
-				if (!rmax::s_TextureTypeMap.count(resource))
-					continue;
-
-				const MaterialTextureExportInfo_s& info = materialExport.textures.find(entry.index)->second;
-				const std::string path = std::format("{}/{}", info.exportPath.string(), info.exportName);
-
-				matl->AddTexture(path.c_str(), rmax::s_TextureTypeMap.find(resource)->second);
+				texcoordsPerVert = pMesh->texcoordCount > texcoordsPerVert ? pMesh->texcoordCount : texcoordsPerVert;
+				weightsPerVert = pMesh->weightsPerVert > weightsPerVert ? pMesh->weightsPerVert : weightsPerVert;
 			}
 		}
+	}
 
-		// do models
-		rmaxFile.ReserveCollections(lodData.models.size());
-		rmaxFile.ReserveMeshes(lodData.meshes.size());
-		rmaxFile.ReserveVertices(lodData.vertexCount, lodData.texcoordsPerVert, lodData.weightsPerVert);
-		rmaxFile.ReserveIndices(lodData.indexCount);
-		for (auto& model : lodData.models)
+	// [rika]: calculate how many of each type we got to allocate in one big go
+	uint32_t numVertices;
+	uint32_t numIndices;
+	uint32_t numMeshes;
+
+	// [rika]: once upon a time we pulled this from LOD (might be useless now actually), but going with this system to allow ModelModelData_t to be used for different types of data prevents us from specifically using the LOD
+	uint16_t texcoordsPerVert;
+	uint16_t weightsPerVert;
+};
+
+// rmax
+void ParseMaterialIntoRMAX(const ModelParsedData_t* const parsedData, const ModelMaterialExportMap_t* const materials, rmax::RMAXExporter* const rmax)
+{
+	rmax->ReserveMaterials(parsedData->MaterialCount());
+
+	for (int materialId = 0; materialId < parsedData->MaterialCount(); materialId++)
+	{
+		const ModelMaterialData_t* const pMaterialData = parsedData->pMaterial(materialId);
+
+		// [rika]: if it's unloaded, or unused we will just write a stub material
+		if (!pMaterialData->asset)
 		{
-			if (!model.meshCount)
+			rmax->AddMaterial(pMaterialData->GetName(true));
+			continue;
+		}
+
+		assert(pMaterialData->GetMaterialAsset());
+		const MaterialAsset* const materialAsset = pMaterialData->GetMaterialAsset();
+		rmax->AddMaterial(materialAsset->name);
+
+		// [rika]: write stub material (unused material)
+		if (!materials->contains(materialId) || !materialAsset->resourceBindings.size())
+			continue;
+
+		const ModelMaterialExport_t& materialExport = materials->find(materialId)->second;
+
+		rmax::RMAXMaterial* const matl = rmax->GetMaterialLast();
+
+		for (const TextureAssetEntry_t& entry : materialAsset->txtrAssets)
+		{
+			// [rika]: we don't have a resource binding or we don't have a name for the texture
+			if (!materialAsset->resourceBindings.count(entry.index) || !materialExport.textures.contains(entry.index))
 				continue;
 
-			rmaxFile.AddCollection(model.name.c_str(), model.meshCount);
+			const std::string resource = materialAsset->resourceBindings.find(entry.index)->second.name;
 
-			for (uint32_t meshIdx = 0; meshIdx < model.meshCount; meshIdx++)
+			// [rika]: do we need this resource?
+			if (!rmax::s_TextureTypeMap.count(resource))
+				continue;
+
+			const MaterialTextureExportInfo_s& info = materialExport.textures.find(entry.index)->second;
+			const std::string filePath = std::format("{}/{}", info.exportPath.string(), info.exportName);
+
+			matl->AddTexture(filePath.c_str(), rmax::s_TextureTypeMap.find(resource)->second);
+		}
+	}
+}
+
+bool ExportModelRMAX(const ModelParsedData_t* const parsedData, const ModelMaterialExportMap_t* const materials, const ModelModelData_t* const models, const int numModels, void* const file, const char* const fileName)
+{
+	rmax::RMAXExporter* const rmax = reinterpret_cast<rmax::RMAXExporter* const>(file);
+	rmax->SetName(fileName);
+
+	// [rika]: parse materials in to file if they have not been already
+	if (rmax->MaterialCount() == 0ull)
+	{
+		ParseMaterialIntoRMAX(parsedData, materials, rmax);
+	}
+
+	const ModelExportInfo_t modelInfo(models, numModels);
+
+	// [rika]: RMAXExporter uses std::vector (old and not updating), allocate all at once to avoid performance hits from allocating over and over
+	rmax->ReserveCollections(numModels);
+	rmax->ReserveMeshes(modelInfo.numMeshes);
+	rmax->ReserveVertices(modelInfo.numVertices, modelInfo.texcoordsPerVert, modelInfo.weightsPerVert);
+	rmax->ReserveIndices(modelInfo.numIndices);
+
+	for (int modelIdx = 0; modelIdx < numModels; modelIdx++)
+	{
+		const ModelModelData_t* const pModel = models + modelIdx;
+
+		if (pModel->meshCount == 0)
+			continue;
+
+		rmax->AddCollection(pModel->name, pModel->meshCount);
+
+		for (int meshIdx = 0; meshIdx < pModel->meshCount; meshIdx++)
+		{
+			const ModelMeshData_t* const pMesh = pModel->meshes + meshIdx;
+
+			assertm(pMesh->meshVertexDataIndex != invalidNoodleIdx, "mesh data hasn't been parsed ??");
+
+			std::unique_ptr<char[]> parsedVertexDataBuf = parsedData->meshVertexData.getIdx(pMesh->meshVertexDataIndex);
+			const CMeshData* const parsedVertexData = reinterpret_cast<CMeshData*>(parsedVertexDataBuf.get());
+
+			const uint16_t* const indices = parsedVertexData->GetIndices();
+			const Vertex_t* const vertices = parsedVertexData->GetVertices();
+			const VertexWeight_t* const weights = parsedVertexData->GetWeights();
+			const Vector2D* const texcoords = parsedVertexData->GetTexcoords();
+
+			// [rika]: get the material for the skin in that index
+			assertm(materials->contains(pMesh->materialId), "material should be parsed as it is used");
+			const ModelMaterialExport_t* const materialExportInfo = &materials->find(pMesh->materialId)->second;
+
+			rmax->AddMesh(static_cast<int16_t>(modelIdx), static_cast<int16_t>(materialExportInfo->id), pMesh->texcoordCount, pMesh->texcoodIndices, (pMesh->rawVertexLayoutFlags & VERT_COLOR));
+
+			rmax::RMAXMesh* const mesh = rmax->GetMeshLast();
+
+			// data parsing
+			for (uint32_t i = 0; i < pMesh->vertCount; i++)
 			{
-				const ModelMeshData_t& meshData = model.meshes[meshIdx];
+				const Vertex_t* const pVertex = vertices + i;
 
-				assertm(materials.contains(meshData.materialId), "material should be parsed as it is used");
-				const ModelMaterialExport_t& material = materials.find(meshData.materialId)->second;
+				Vector normal;
+				Vector tangent;
+				pVertex->normalPacked.UnpackNormal(normal, tangent);
 
-				assertm(meshData.meshVertexDataIndex != invalidNoodleIdx, "mesh data hasn't been parsed ??");
+				mesh->AddVertex(pVertex->position, normal);
 
-				std::unique_ptr<char[]> parsedVertexDataBuf = parsedData->meshVertexData.getIdx(meshData.meshVertexDataIndex);
-				const CMeshData* const parsedVertexData = reinterpret_cast<CMeshData*>(parsedVertexDataBuf.get());
+				if (pMesh->rawVertexLayoutFlags & VERT_COLOR)
+					mesh->AddColor(pVertex->color);
 
-				rmaxFile.AddMesh(static_cast<int16_t>(rmaxFile.CollectionCount() - 1), static_cast<int16_t>(material.id), meshData.texcoordCount, meshData.texcoodIndices, (meshData.rawVertexLayoutFlags & VERT_COLOR));
+				for (uint16_t texcoordIdx = 0; texcoordIdx < pMesh->texcoordCount; texcoordIdx++)
+					mesh->AddTexcoord(*pVertex->GetTexcoordForVertex(texcoordIdx, pMesh->texcoordCount, texcoords, i));
 
-				rmax::RMAXMesh* const mesh = rmaxFile.GetMeshLast();
-
-				// data parsing
-				for (uint32_t i = 0; i < meshData.vertCount; i++)
+				for (uint32_t weightIdx = 0; weightIdx < pVertex->weightCount; weightIdx++)
 				{
-					const Vertex_t* const vertData = &parsedVertexData->GetVertices()[i];
-
-					Vector normal;
-					Vector tangent;
-					vertData->normalPacked.UnpackNormal(normal, tangent);
-
-					mesh->AddVertex(vertData->position, normal);
-
-					if (meshData.rawVertexLayoutFlags & VERT_COLOR)
-						mesh->AddColor(vertData->color);
-
-					for (uint16_t texcoordIdx = 0; texcoordIdx < meshData.texcoordCount; texcoordIdx++)
-						mesh->AddTexcoord(*vertData->GetTexcoordForVertex(texcoordIdx, meshData.texcoordCount, parsedVertexData->GetTexcoords(), i));
-
-					for (uint32_t weightIdx = 0; weightIdx < vertData->weightCount; weightIdx++)
-					{
-						const VertexWeight_t* const weight = &parsedVertexData->GetWeights()[vertData->weightIndex + weightIdx];
-						mesh->AddWeight(i, weight->bone, weight->weight);
-					}
+					const VertexWeight_t* const weight = weights + (pVertex->weightIndex + weightIdx);
+					mesh->AddWeight(i, weight->bone, weight->weight);
 				}
-
-				for (uint32_t i = 0; i < meshData.indexCount; i += 3)
-					mesh->AddIndice(parsedVertexData->GetIndices()[i], parsedVertexData->GetIndices()[i + 1], parsedVertexData->GetIndices()[i + 2]);
 			}
-		}
 
-		rmaxFile.ToFile();
-		rmaxFile.ResetMeshData();
+			for (uint32_t i = 0; i < pMesh->indexCount; i += 3)
+				mesh->AddIndice(indices[i], indices[i + 1], indices[i + 2]);
+		}
 	}
+
+	CManagedBuffer* const buffer = g_BufferManager.ClaimBuffer();
+
+	rmax->ToFile(buffer->Buffer());
+	rmax->ResetMeshData();
+
+	g_BufferManager.RelieveBuffer(buffer);
 
 	return true;
 }
 
 // export parsed data to cast
 // [rika]: todo rewrite this soon tm (it is so bad)
-bool ExportModelCast(const ModelParsedData_t* const parsedData, std::filesystem::path& exportPath, const uint64_t guid)
+void ParseMaterialIntoCast(const ModelParsedData_t* const parsedData, const ModelMaterialExport_t* const materialExportInfo, cast::CastNode* const modelNode)
 {
-	std::string fileNameBase = exportPath.stem().string();
+	const ModelMaterialData_t* const pMaterialData = parsedData->pMaterial(materialExportInfo->id);
 
-	// [rika]: build the skeleton once, and reuse it
-	cast::CastNode skelNode(cast::CastId::Skeleton, RTech::StringToGuid(fileNameBase.c_str()));
+	// [rika]: a cast material has at least two properties, name and material type (pbr in our case)
+	cast::CastNode matlNode(cast::CastId::Material, 2, pMaterialData->guid);
+	matlNode.SetProperty(1, cast::CastPropertyId::String, static_cast<int>(cast::CastPropsMaterial::Type), "pbr", 1u);
+
+	if (!pMaterialData->asset)
 	{
-		const size_t boneCount = parsedData->bones.size();
-		skelNode.ReserveChildren(boneCount);
-
-		// uses hashes for lookup, still gets bone parents by index :clown:
-		for (size_t i = 0; i < boneCount; i++)
-		{
-			const ModelBone_t& boneData = parsedData->bones.at(i);
-
-			cast::CastNodeBone boneNode(&skelNode);
-			boneNode.MakeBone(boneData.name, boneData.parent, &boneData.pos, &boneData.quat, false);
-		}
-	}
-	const cast::CastNode& skelNodeConst = skelNode;
-
-	// [rika]: model is skin and bones, no meat
-	if (parsedData->lods.size() == 0)
-	{
-		const std::string tmpName(std::format("{}.cast", fileNameBase));
-		exportPath.replace_filename(tmpName);
-
-		cast::CastExporter cast(exportPath.string());
-
-		// cast
-		cast::CastNode* const rootNode = cast.GetChild(0); // we only have one root node, no hash
-		cast::CastNode* const modelNode = rootNode->AddChild(cast::CastId::Model, guid);
-
-		// [rika]: we can predict how big this vector needs to be, however resizing it will make adding new members a pain.
-		const size_t modelChildrenCount = 1; // skeleton (one)
-		modelNode->ReserveChildren(modelChildrenCount);
-
-		// do skeleton
-		modelNode->AddChild(skelNode); // one time use
-
-		cast.ToFile();
-
-		return true;
+		matlNode.SetProperty(0, cast::CastPropertyId::String, static_cast<int>(cast::CastPropsMaterial::Name), GetStringAfterLastSlash(pMaterialData->name), 1u); // unsure why it does this but we're rolling with it!
+		modelNode->AddChild(matlNode);
+		return;
 	}
 
-	const std::filesystem::path texturePath(std::format("{}/{}", exportPath.parent_path().string(), fileNameBase)); // todo, remove duplicate code
-	std::unordered_map<int, ModelMaterialExport_t> materials;
-	HandleModelMaterials(parsedData, materials, texturePath);
+	assert(pMaterialData->GetMaterialAsset());
+	const MaterialAsset* const materialAsset = pMaterialData->GetMaterialAsset();
 
-	for (size_t lodIdx = 0; lodIdx < parsedData->lods.size(); lodIdx++)
+	matlNode.SetProperty(0, cast::CastPropertyId::String, static_cast<int>(cast::CastPropsMaterial::Name), GetStringAfterLastSlash(materialAsset->name), 1u);
+
+	// [rika]: parse out our textures if we have bindings for them, don't if not
+	// [rika]: exit early if no textures
+	if (materialAsset->resourceBindings.empty())
 	{
-		const ModelLODData_t& lodData = parsedData->lods.at(lodIdx);
+		modelNode->AddChild(matlNode);
+		return;
+	}
 
-		std::string tmpName(std::format("{}_LOD{}.cast", fileNameBase, std::to_string(lodIdx)));
-		exportPath.replace_filename(tmpName);
+	for (const TextureAssetEntry_t& entry : materialAsset->txtrAssets)
+	{
+		// [rika]: we don't have a resource binding or we don't have a name for the texture
+		if (!materialAsset->resourceBindings.count(entry.index) || !materialExportInfo->textures.contains(entry.index))
+			continue;
 
-		cast::CastExporter cast(exportPath.string());
+		const std::string resource(materialAsset->resourceBindings.find(entry.index)->second.name);
 
-		// cast
-		cast::CastNode* rootNode = cast.GetChild(0); // we only have one root node, no hash
-		cast::CastNode* modelNode = rootNode->AddChild(cast::CastId::Model, guid);
+		// [rika]: texture type isn't supported, skip it
+		if (!cast::s_TextureTypeMap.count(resource))
+			continue;
 
-		// [rika]: we can predict how big this vector needs to be, however resizing it will make adding new members a pain.
-		const size_t modelChildrenCount = 1 + parsedData->materials.size() + lodData.meshes.size(); // skeleton (one), materials (varies), meshes (varies)
-		modelNode->ReserveChildren(modelChildrenCount);
+		const MaterialTextureExportInfo_s& info = materialExportInfo->textures.find(entry.index)->second;
+		const std::string filePath = std::format("{}/{}.png", info.exportPath.string(), info.exportName);
 
-		// do skeleton
-		modelNode->AddChild(skelNodeConst);
+		const uint64_t textureGuid = entry.asset->data()->guid; // texture guid
 
-		// do materials
-		for (const auto& it : materials)
+		const cast::CastPropsMaterial matlTxtrProp = cast::s_TextureTypeMap.find(resource)->second;
+
+		matlNode.AddProperty(cast::CastPropertyId::Integer64, static_cast<int>(matlTxtrProp), textureGuid);
+
+		cast::CastNode fileNode(cast::CastId::File, 1, textureGuid);
+
+		// [rika]: need to figure out how this works more
+		fileNode.SetString(filePath); // materials exported from models always use png, as blender support for dds is bad, todo: make it so we can use ALL formats!
+		fileNode.SetProperty(0, cast::CastPropertyId::String, static_cast<int>(cast::CastPropsFile::Path), fileNode.GetString(), 1u);
+
+		matlNode.AddChild(fileNode);
+	}
+
+	modelNode->AddChild(matlNode);
+}
+
+bool ExportModelCAST(const ModelParsedData_t* const parsedData, const ModelMaterialExportMap_t* const materials, const ModelModelData_t* const models, const int numModels, void* const file, const char* const fileName)
+{
+	cast::CastExporter* const cast = reinterpret_cast<cast::CastExporter* const>(file);
+	cast->SetName(fileName);
+
+	// cast
+	cast::CastNode* rootNode = cast->GetChild(0); // we only have one root node, no hash
+	cast::CastNode* modelNode = rootNode->AddChild(cast::CastId::Model, cast->GetGUID());
+
+	// [rika]: we can predict how big this vector needs to be, however resizing it will make adding new members a pain.
+	const size_t modelChildrenCount = 1ull + parsedData->MaterialCount() + numModels; // skeleton (one), materials (varies), meshes (varies)
+	modelNode->ReserveChildren(modelChildrenCount);
+
+	// [rika]: yoink the pre parsed skeleton
+	modelNode->AddChild(cast->GetSkeleton());
+
+	const ModelExportInfo_t modelInfo(models, numModels);
+
+	CManagedBuffer* const vertexBuffer = g_BufferManager.ClaimBuffer();
+
+	// [rika]: has to be store in a linear format so we copy everything out
+	Vector* const linearPositions = reinterpret_cast<Vector* const>(vertexBuffer->Buffer());
+	Vector* const linearNormals = linearPositions + modelInfo.numVertices;
+	Color32* const linearColors = reinterpret_cast<Color32* const>(linearNormals + modelInfo.numVertices);
+	Vector2D* const linearTexcoords = reinterpret_cast<Vector2D* const>(linearColors + modelInfo.numVertices); // all uvs stored here
+
+	// [rika]: we have to flip the winding of these
+	uint16_t* const linearIndices = reinterpret_cast<uint16_t* const>(linearTexcoords + (modelInfo.numVertices * modelInfo.texcoordsPerVert));
+
+	const size_t boneIndiceWidth = parsedData->BoneCount() > 256 ? sizeof(uint16_t) : sizeof(uint8_t);
+	float* const linearBlendWeights = reinterpret_cast<float* const>(linearIndices + modelInfo.numIndices);
+	void* const linearBlendIndices = reinterpret_cast<void* const>(linearBlendWeights + (modelInfo.numVertices * modelInfo.weightsPerVert));
+
+	assertm(((char*)linearBlendIndices + ((modelInfo.numVertices * modelInfo.weightsPerVert) * boneIndiceWidth)) - (char*)linearPositions < managedBufferSize, "exceeded managed buffer size");
+
+	size_t curIndex = 0; // current index into vertex data
+	size_t indiceIndex = 0;
+
+	// do meshes
+	for (int modelIdx = 0; modelIdx < numModels; modelIdx++)
+	{
+		const ModelModelData_t* const pModel = models + modelIdx;
+
+		for (int meshIdx = 0; meshIdx < pModel->meshCount; meshIdx++)
 		{
-			const ModelMaterialExport_t& material = it.second;
-			const ModelMaterialData_t* const materialData = &parsedData->materials.at(static_cast<size_t>(material.id));
+			const ModelMeshData_t* const pMesh = pModel->meshes + meshIdx;
 
-			// [rika]: a cast material has at least two properties, name and material type (pbr in our case)
-			cast::CastNode matlNode(cast::CastId::Material, 2, materialData->guid);
-			matlNode.SetProperty(1, cast::CastPropertyId::String, static_cast<int>(cast::CastPropsMaterial::Type), "pbr", 1u);
+			assertm(pMesh->meshVertexDataIndex != invalidNoodleIdx, "mesh data hasn't been parsed ??");
 
-			if (!material.asset)
+			std::unique_ptr<char[]> parsedVertexDataBuf = parsedData->meshVertexData.getIdx(pMesh->meshVertexDataIndex);
+			const CMeshData* const parsedVertexData = reinterpret_cast<CMeshData*>(parsedVertexDataBuf.get());
+
+			const uint16_t* const indices = parsedVertexData->GetIndices();
+			const Vertex_t* const vertices = parsedVertexData->GetVertices();
+			const VertexWeight_t* const weights = parsedVertexData->GetWeights();
+			const Vector2D* const texcoords = parsedVertexData->GetTexcoords();
+
+			// [rika]: get the material for the skin in that index
+			assertm(materials->contains(pMesh->materialId), "material should be parsed as it is used");
+			const ModelMaterialExport_t* const materialExportInfo = &materials->find(pMesh->materialId)->second;
+			const uint64_t materialGUID = parsedData->pMaterial(materialExportInfo->id)->guid;
+
+			ParseMaterialIntoCast(parsedData, materialExportInfo, modelNode);
+
+			std::string matl = nullptr != pMesh->materialAsset ? GetStringAfterLastSlash(pMesh->GetMaterialAsset()->name) : std::to_string(materialGUID);
+			std::string meshName = std::format("{}_{}", pModel->name, matl);
+			cast::CastNode meshNode(cast::CastId::Mesh, 1, RTech::StringToGuid(meshName.c_str())); // name
+
+			// name, pos, normal, blendweight, blendindices, indices, uv count, max blends, material, texcoords, color
+			const size_t meshPropertiesCount = 9 + pMesh->texcoordCount + (pMesh->rawVertexLayoutFlags & VERT_COLOR ? 1 : 0);
+			meshNode.ReserveProperties(meshPropertiesCount);
+
+			// works on files but not here, why?
+			// update: now it works after changing how the string is formed, lovely.
+			meshNode.SetString(meshName);
+			meshNode.SetProperty(0, cast::CastPropertyId::String, static_cast<int>(cast::CastPropsMesh::Name), meshNode.GetString(), 1u);
+
+			meshNode.AddProperty(cast::CastPropertyId::Vector3, static_cast<int>(cast::CastPropsMesh::Vertex_Postion_Buffer),linearPositions + curIndex, pMesh->vertCount);
+			meshNode.AddProperty(cast::CastPropertyId::Vector3, static_cast<int>(cast::CastPropsMesh::Vertex_Normal_Buffer), linearNormals + curIndex, pMesh->vertCount);
+
+			if (pMesh->rawVertexLayoutFlags & VERT_COLOR)
+				meshNode.AddProperty(cast::CastPropertyId::Integer32, static_cast<int>(cast::CastPropsMesh::Vertex_Color_Buffer), linearColors + curIndex, pMesh->vertCount);
+
+			// cast cries if we use the proper index
+			for (int16_t texcoordIdx = 0; texcoordIdx < pMesh->texcoordCount; texcoordIdx++)
+				meshNode.AddProperty(cast::CastPropertyId::Vector2, static_cast<int>(cast::CastPropsMesh::Vertex_UV_Buffer), linearTexcoords + ((modelInfo.numVertices * texcoordIdx) + curIndex), pMesh->vertCount, true, texcoordIdx);
+
+			meshNode.AddProperty(boneIndiceWidth == sizeof(uint16_t) ? cast::CastPropertyId::Short : cast::CastPropertyId::Byte, static_cast<int>(cast::CastPropsMesh::Vertex_Weight_Bone_Buffer), reinterpret_cast<char*>(linearBlendIndices) + ((modelInfo.weightsPerVert * curIndex) * boneIndiceWidth), (pMesh->vertCount * pMesh->weightsPerVert));
+			meshNode.AddProperty(cast::CastPropertyId::Float, static_cast<int>(cast::CastPropsMesh::Vertex_Weight_Value_Buffer), linearBlendWeights + (modelInfo.weightsPerVert * curIndex), (pMesh->vertCount * pMesh->weightsPerVert));
+
+			// parse our vertices into the buffer, so cringe!
+			for (uint32_t vertIdx = 0; vertIdx < pMesh->vertCount; vertIdx++)
 			{
-				matlNode.SetProperty(0, cast::CastPropertyId::String, static_cast<int>(cast::CastPropsMaterial::Name), GetStringAfterLastSlash(materialData->name), 1u); // unsure why it does this but we're rolling with it!
-				modelNode->AddChild(matlNode);
-				continue;
-			}
+				const Vertex_t& vert = vertices[vertIdx];
 
-			const MaterialAsset* const materialAsset = material.asset;
+				Vector tangent;
 
-			matlNode.SetProperty(0, cast::CastPropertyId::String, static_cast<int>(cast::CastPropsMaterial::Name), GetStringAfterLastSlash(materialAsset->name), 1u);
+				linearPositions[curIndex + vertIdx] = vert.position;
+				vert.normalPacked.UnpackNormal(linearNormals[curIndex + vertIdx], tangent);
+				linearColors[curIndex + vertIdx] = vert.color;
 
-			// [rika]: parse out our textures if we have bindings for them, don't if not
-			// [rika]: exit early if no textures
-			if (materialAsset->resourceBindings.empty())
-			{
-				modelNode->AddChild(matlNode);
-				continue;
-			}
-
-			for (const TextureAssetEntry_t& entry : materialAsset->txtrAssets)
-			{
-				// [rika]: texture cannot be accurately identified, skip it
-				if (!materialAsset->resourceBindings.count(entry.index))
-					continue;
-
-				const std::string resource(materialAsset->resourceBindings.find(entry.index)->second.name);
-
-				// [rika]: texture type isn't supported, skip it
-				if (!cast::s_TextureTypeMap.count(resource))
-					continue;
-
-				// [rika]: if MaterialTextureExportInfo_s doesn't exist for this texture it's not loaded, and by extension is not exported
-				if (!material.textures.contains(entry.index))
+				for (uint16_t texcoordIdx = 0; texcoordIdx < pMesh->texcoordCount; texcoordIdx++)
 				{
-					// todo: store a name in parsed data
-					//Log("Material %s for model %s did not have a valid texture pointer for res idx %i\n", materialAsset->name, name, entry.index);
-
-					continue;
+					const Vector2D* const texcoord = vert.GetTexcoordForVertex(texcoordIdx, pMesh->texcoordCount, texcoords, vertIdx);
+					linearTexcoords[(modelInfo.numVertices * texcoordIdx) + curIndex + vertIdx] = *texcoord;
 				}
 
-				const MaterialTextureExportInfo_s& info = material.textures.find(entry.index)->second;
-
-				const uint64_t textureGuid = entry.asset->data()->guid; // texture guid
-
-				const cast::CastPropsMaterial matlTxtrProp = cast::s_TextureTypeMap.find(resource)->second;
-
-				matlNode.AddProperty(cast::CastPropertyId::Integer64, static_cast<int>(matlTxtrProp), textureGuid);
-
-				cast::CastNode fileNode(cast::CastId::File, 1, textureGuid);
-
-				// [rika]: need to figure out how this works more
-				const std::string filePath(std::format("{}/{}.png", fileNameBase, info.exportName));
-				fileNode.SetString(filePath); // materials exported from models always use png, as blender support for dds is bad, todo: make it so we can use ALL formats!
-				fileNode.SetProperty(0, cast::CastPropertyId::String, static_cast<int>(cast::CastPropsFile::Path), fileNode.GetString(), 1u);
-
-				matlNode.AddChild(fileNode);
-			}
-
-			modelNode->AddChild(matlNode);
-		}
-
-		// !!! TODO !!!
-		// this needs to get cleaned up, but if I don't push I am gonna be stuck forever
-
-		// [rika]: a system to have these allocated to each node would be cleaner, but more expensive.
-		struct DataPtrs_t {
-			Vector* positions;
-			Vector* normals;
-			Color32* colors;
-			Vector2D* texcoords; // all uvs stored here
-			uint8_t* blendIndices;
-			float* blendWeights;
-
-			uint16_t* indices;
-		};
-
-		DataPtrs_t vertexData{ nullptr };
-
-		//                                    Postion & Normal       Color
-		constexpr size_t castMinSizePerVert = (sizeof(Vector) * 2) + sizeof(Color32);
-
-		char* vertDataBlockBuf = new char[(castMinSizePerVert + (sizeof(Vector2D) * lodData.texcoordsPerVert)) * lodData.vertexCount] {};
-
-		vertexData.positions = reinterpret_cast<Vector*>(vertDataBlockBuf);
-		vertexData.normals = &vertexData.positions[lodData.vertexCount];
-		vertexData.colors = reinterpret_cast<Color32*>(&vertexData.normals[lodData.vertexCount]); // discarded if unneeded
-		vertexData.texcoords = reinterpret_cast<Vector2D*>(&vertexData.colors[lodData.vertexCount]);
-		vertexData.blendIndices = new uint8_t[lodData.vertexCount * lodData.weightsPerVert]{};
-		vertexData.blendWeights = new float[lodData.vertexCount * lodData.weightsPerVert] {};
-
-		vertexData.indices = new uint16_t[lodData.indexCount];
-
-		size_t curIndex = 0; // current index into vertex data
-		size_t idxIndex = 0; // shit format
-
-		// do meshes
-		for (auto& modelData : lodData.models)
-		{
-			for (size_t i = 0; i < modelData.meshCount; i++)
-			{
-				const ModelMeshData_t& meshData = modelData.meshes[i];
-
-				assertm(materials.contains(meshData.materialId), "material should be parsed as it is used");
-				const uint64_t materialGuid = parsedData->materials.at(materials.find(meshData.materialId)->second.id).guid;
-
-				assertm(meshData.meshVertexDataIndex != invalidNoodleIdx, "mesh data hasn't been parsed ??");
-
-				std::unique_ptr<char[]> parsedVertexDataBuf = parsedData->meshVertexData.getIdx(meshData.meshVertexDataIndex);
-				const CMeshData* const parsedVertexData = reinterpret_cast<CMeshData*>(parsedVertexDataBuf.get());
-
-				std::string matl = nullptr != meshData.materialAsset ? GetStringAfterLastSlash(meshData.GetMaterialAsset()->name) : std::to_string(materialGuid);
-				std::string meshName = std::format("{}_{}", modelData.name, matl);
-				cast::CastNode meshNode(cast::CastId::Mesh, 1, RTech::StringToGuid(meshName.c_str())); // name
-
-				// name, pos, normal, blendweight, blendindices, indices, uv count, max blends, material, texcoords, color
-				const size_t meshPropertiesCount = 9 + meshData.texcoordCount + (meshData.rawVertexLayoutFlags & VERT_COLOR ? 1 : 0);
-				meshNode.ReserveProperties(meshPropertiesCount);
-
-				// works on files but not here, why?
-				// update: now it works after changing how the string is formed, lovely.
-				meshNode.SetString(meshName);
-				meshNode.SetProperty(0, cast::CastPropertyId::String, static_cast<int>(cast::CastPropsMesh::Name), meshNode.GetString(), 1u);
-
-				meshNode.AddProperty(cast::CastPropertyId::Vector3, static_cast<int>(cast::CastPropsMesh::Vertex_Postion_Buffer), &vertexData.positions[curIndex], meshData.vertCount);
-				meshNode.AddProperty(cast::CastPropertyId::Vector3, static_cast<int>(cast::CastPropsMesh::Vertex_Normal_Buffer), &vertexData.normals[curIndex], meshData.vertCount);
-
-				if (meshData.rawVertexLayoutFlags & VERT_COLOR)
-					meshNode.AddProperty(cast::CastPropertyId::Integer32, static_cast<int>(cast::CastPropsMesh::Vertex_Color_Buffer), &vertexData.colors[curIndex], meshData.vertCount);
-
-				// cast cries if we use the proper index
-				for (int16_t texcoordIdx = 0; texcoordIdx < meshData.texcoordCount; texcoordIdx++)
-					meshNode.AddProperty(cast::CastPropertyId::Vector2, static_cast<int>(cast::CastPropsMesh::Vertex_UV_Buffer), &vertexData.texcoords[(lodData.vertexCount * texcoordIdx) + curIndex], meshData.vertCount, true, texcoordIdx);
-
-				meshNode.AddProperty(cast::CastPropertyId::Byte, static_cast<int>(cast::CastPropsMesh::Vertex_Weight_Bone_Buffer), &vertexData.blendIndices[lodData.weightsPerVert * curIndex], (meshData.vertCount * meshData.weightsPerVert));
-				meshNode.AddProperty(cast::CastPropertyId::Float, static_cast<int>(cast::CastPropsMesh::Vertex_Weight_Value_Buffer), &vertexData.blendWeights[lodData.weightsPerVert * curIndex], (meshData.vertCount * meshData.weightsPerVert));
-
-				// parse our vertices into the buffer, so cringe!
-				for (uint32_t vertIdx = 0; vertIdx < meshData.vertCount; vertIdx++)
+				const size_t baseWeightIndex = ((modelInfo.weightsPerVert * curIndex) + (pMesh->weightsPerVert * vertIdx)) * boneIndiceWidth;
+				switch (boneIndiceWidth)
 				{
-					const Vertex_t& vert = parsedVertexData->GetVertices()[vertIdx];
-
-					Vector tangent;
-
-					vertexData.positions[curIndex + vertIdx] = vert.position;
-					vert.normalPacked.UnpackNormal(vertexData.normals[curIndex + vertIdx], tangent);
-					vertexData.colors[curIndex + vertIdx] = vert.color;
-
-					for (uint16_t texcoordIdx = 0; texcoordIdx < meshData.texcoordCount; texcoordIdx++)
+				case sizeof(uint8_t):
+				{
+					for (uint32_t weightIdx = 0; weightIdx < pMesh->weightsPerVert; weightIdx++)
 					{
-						const Vector2D* const texcoord = vert.GetTexcoordForVertex(texcoordIdx, meshData.texcoordCount, parsedVertexData->GetTexcoords(), vertIdx);
-						vertexData.texcoords[(lodData.vertexCount * texcoordIdx) + curIndex + vertIdx] = *texcoord;
+						if (weightIdx < vert.weightCount)
+						{
+							reinterpret_cast<uint8_t*>(linearBlendIndices)[baseWeightIndex + weightIdx] = static_cast<uint8_t>(weights[vert.weightIndex + weightIdx].bone);
+							linearBlendWeights[baseWeightIndex + weightIdx] = weights[vert.weightIndex + weightIdx].weight;
+						}
+						else
+						{
+							reinterpret_cast<uint8_t*>(linearBlendIndices)[baseWeightIndex + weightIdx] = 0u;
+							linearBlendWeights[baseWeightIndex + weightIdx] = 0.0f;
+						}
 					}
 
-					for (uint32_t weightIdx = 0; weightIdx < vert.weightCount; weightIdx++)
-					{
-						vertexData.blendIndices[(lodData.weightsPerVert * curIndex) + (meshData.weightsPerVert * vertIdx) + weightIdx] = static_cast<uint8_t>(parsedVertexData->GetWeights()[vert.weightIndex + weightIdx].bone);
-						vertexData.blendWeights[(lodData.weightsPerVert * curIndex) + (meshData.weightsPerVert * vertIdx) + weightIdx] = parsedVertexData->GetWeights()[vert.weightIndex + weightIdx].weight;
-					}
+					break;
 				}
-
-				// parse our indices into the buffer, and shuffle them! extra cringe!
-				const uint32_t indexCount = meshData.indexCount;
-				meshNode.AddProperty(cast::CastPropertyId::Short, static_cast<int>(cast::CastPropsMesh::Face_Buffer), &vertexData.indices[idxIndex], indexCount);
-
-				for (uint32_t idxIdx = 0; idxIdx < indexCount; idxIdx += 3)
+				case sizeof(uint16_t):
 				{
-					vertexData.indices[idxIndex + idxIdx] = parsedVertexData->GetIndices()[idxIdx + 2];
-					vertexData.indices[idxIndex + idxIdx + 1] = parsedVertexData->GetIndices()[idxIdx + 1];
-					vertexData.indices[idxIndex + idxIdx + 2] = parsedVertexData->GetIndices()[idxIdx];
+					for (uint32_t weightIdx = 0; weightIdx < pMesh->weightsPerVert; weightIdx++)
+					{
+						if (weightIdx < vert.weightCount)
+						{
+							reinterpret_cast<uint16_t*>(linearBlendIndices)[baseWeightIndex + weightIdx] = weights[vert.weightIndex + weightIdx].bone;
+							linearBlendWeights[baseWeightIndex + weightIdx] = weights[vert.weightIndex + weightIdx].weight;
+						}
+						else
+						{
+							reinterpret_cast<uint16_t*>(linearBlendIndices)[baseWeightIndex + weightIdx] = 0u;
+							linearBlendWeights[baseWeightIndex + weightIdx] = 0.0f;
+						}
+					}
+
+					break;
 				}
-
-				meshNode.AddProperty(cast::CastPropertyId::Short, static_cast<int>(cast::CastPropsMesh::UV_Layer_Count), meshData.texcoordCount);
-				meshNode.AddProperty(cast::CastPropertyId::Short, static_cast<int>(cast::CastPropsMesh::Max_Weight_Influence), meshData.weightsPerVert);
-
-				meshNode.AddProperty(cast::CastPropertyId::Integer64, static_cast<int>(cast::CastPropsMesh::Material), materialGuid);
-
-				modelNode->AddChild(meshNode);
-
-				curIndex += meshData.vertCount;
-				idxIndex += indexCount;
+				default:
+				{
+					assertm(false, "bad indice width");
+					break;
+				}
+				}
 			}
+
+			// parse our indices into the buffer, and flip the winding
+			const uint32_t indexCount = pMesh->indexCount;
+			meshNode.AddProperty(cast::CastPropertyId::Short, static_cast<int>(cast::CastPropsMesh::Face_Buffer), linearIndices + indiceIndex, indexCount);
+
+			for (uint32_t idxIdx = 0; idxIdx < indexCount; idxIdx += 3)
+			{
+				const size_t baseIndex = indiceIndex + idxIdx;
+
+				linearIndices[baseIndex] = indices[idxIdx + 2];
+				linearIndices[baseIndex + 1] = indices[idxIdx + 1];
+				linearIndices[baseIndex + 2] = indices[idxIdx];
+			}
+
+			meshNode.AddProperty(cast::CastPropertyId::Short, static_cast<int>(cast::CastPropsMesh::UV_Layer_Count), pMesh->texcoordCount);
+			meshNode.AddProperty(cast::CastPropertyId::Short, static_cast<int>(cast::CastPropsMesh::Max_Weight_Influence), pMesh->weightsPerVert);
+
+			meshNode.AddProperty(cast::CastPropertyId::Integer64, static_cast<int>(cast::CastPropsMesh::Material), materialGUID);
+
+			modelNode->AddChild(meshNode);
+
+			curIndex += pMesh->vertCount;
+			indiceIndex += indexCount;
 		}
-
-		cast.ToFile();
-
-		// cleanup our allocated buffers
-		delete[] vertDataBlockBuf;
-		delete[] vertexData.blendIndices;
-		delete[] vertexData.blendWeights;
-
-		delete[] vertexData.indices;
 	}
+
+	CManagedBuffer* const exportBuffer = g_BufferManager.ClaimBuffer();
+
+	cast->ToFile(exportBuffer->Buffer());
+	cast->Reset(0ull);
+
+	g_BufferManager.RelieveBuffer(vertexBuffer);
+	g_BufferManager.RelieveBuffer(exportBuffer);
 
 	return true;
 }
 
+// smd
 // parse a Vertex_t into a smd vertex
 inline void ParseVertexIntoSMD(const Vertex_t* const srcVert, const VertexWeight_t* const srcWeights, smd::Vertex* const vert, const bool isStaticProp, const uint32_t texcoordWidth = 1u, const Vector2D* const extraTexcoords = nullptr, const uint32_t vertexIndex = 0u)
 {
@@ -1468,116 +3095,242 @@ inline void ParseVertexIntoSMD(const Vertex_t* const srcVert, const VertexWeight
 	}
 }
 
-// export parsed data into smd files
-bool ExportModelSMD(const ModelParsedData_t* const parsedData, std::filesystem::path& exportPath)
+bool ExportModelSMD(const ModelParsedData_t* const parsedData, const ModelMaterialExportMap_t* const materials, const ModelModelData_t* const models, const int numModels, void* const file, const char* const fileName)
 {
-	std::string fileNameBase = exportPath.stem().string();
-	const std::filesystem::path filePath(exportPath.parent_path());
+	smd::CStudioModelData* const smd = reinterpret_cast<smd::CStudioModelData* const>(file);
+	smd->SetName(fileName);
 
-	smd::CStudioModelData* const smd = new smd::CStudioModelData(filePath, parsedData->bones.size(), 1ull);
+	const bool isStaticProp = parsedData->IsStaticProp();
 
-	// [rika]: initialize the nodes, and in this case the frames since we should only have one
-	for (size_t i = 0; i < parsedData->bones.size(); i++)
+	for (int modelIdx = 0; modelIdx < numModels; modelIdx++)
 	{
-		const ModelBone_t& bone = parsedData->bones.at(i);
-		const int ibone = static_cast<int>(i);
+		const ModelModelData_t* const model = models + modelIdx;
 
-		smd->InitNode(bone.name, ibone, bone.parent);
-		smd->InitFrameBone(0, ibone, bone.pos, bone.rot);
-	}
-
-	// [rika]: model is skin and bones, no meat
-	if (parsedData->lods.size() == 0)
-	{
-		smd->SetName(fileNameBase);
-		smd->Write();
-
-		return true;
-	}
-
-	const std::filesystem::path texturePath(std::format("{}/{}", filePath.string(), fileNameBase)); // todo, remove duplicate code
-	std::unordered_map<int, ModelMaterialExport_t> materials;
-	HandleModelMaterials(parsedData, materials, texturePath);
-
-	const bool isStaticProp = parsedData->studiohdr.flags & STUDIOHDR_FLAGS_STATIC_PROP ? true : false;
-
-	CManagedBuffer* const buf = g_BufferManager.ClaimBuffer();
-
-	for (size_t lodIdx = 0; lodIdx < parsedData->lods.size(); lodIdx++)
-	{
-		const ModelLODData_t& lod = parsedData->lods.at(lodIdx);
-
-		for (const ModelModelData_t& model : lod.models)
+		for (uint32_t meshIdx = 0; meshIdx < model->meshCount; meshIdx++)
 		{
-			std::string name(model.name);
-			FixupExportLodNames(name, static_cast<int>(lodIdx));
+			const ModelMeshData_t* const pMesh = model->meshes + meshIdx;
 
-			// unique prefix so we don't overwrite files
-			name = std::format("{}_{}", fileNameBase, name);
-			smd->SetName(name);
+			assertm(pMesh->meshVertexDataIndex != invalidNoodleIdx, "mesh data hasn't been parsed ??");
 
-			for (uint32_t meshIdx = 0; meshIdx < model.meshCount; meshIdx++)
+			std::unique_ptr<char[]> parsedVertexDataBuf = parsedData->meshVertexData.getIdx(pMesh->meshVertexDataIndex);
+			const CMeshData* const parsedVertexData = reinterpret_cast<CMeshData*>(parsedVertexDataBuf.get());
+
+			const uint16_t* const indices = parsedVertexData->GetIndices();
+			const Vertex_t* const vertices = parsedVertexData->GetVertices();
+			const VertexWeight_t* const weights = parsedVertexData->GetWeights();
+			const Vector2D* const texcoords = parsedVertexData->GetTexcoords();
+
+			// [rika]: add more triangles
+			smd->AddMeshCapacity(pMesh->vertCount, pMesh->indexCount / 3u);
+
+			// [rika]: get the material for the skin in that index
+			assertm(materials->contains(pMesh->materialId), "material should be parsed as it is used");
+			const ModelMaterialExport_t* const materialExportInfo = &materials->find(pMesh->materialId)->second;
+
+			const ModelMaterialData_t* const materialData = parsedData->pMaterial(materialExportInfo->id);
+
+			// [rika]: making the choice to use the stored rmdl name here when possible, as that is what it was likely compiled with
+			const char* material = materialData->GetName(true);
+			assertm(material, "material name should always be valid");
+
+			material = g_rsxSettings.exportModelMatsTruncated ? material : GetStringAfterLastSlash(material);
+
+			for (uint32_t vertexIdx = 0; vertexIdx < pMesh->vertCount; vertexIdx++)
 			{
-				const ModelMeshData_t& meshData = lod.meshes.at(model.meshIndex + meshIdx);
+				smd::Vertex vertex;
+				ParseVertexIntoSMD(&vertices[vertexIdx], weights, &vertex, isStaticProp, pMesh->texcoordCount, texcoords, vertexIdx);
 
-				assertm(meshData.meshVertexDataIndex != invalidNoodleIdx, "mesh data hasn't been parsed ??");
-
-				std::unique_ptr<char[]> parsedVertexDataBuf = parsedData->meshVertexData.getIdx(meshData.meshVertexDataIndex);
-				const CMeshData* const parsedVertexData = reinterpret_cast<CMeshData*>(parsedVertexDataBuf.get());
-
-				const uint16_t* const indices = parsedVertexData->GetIndices();
-				const Vertex_t* const vertices = parsedVertexData->GetVertices();
-				const VertexWeight_t* const weights = parsedVertexData->GetWeights();
-				const Vector2D* const texcoords = parsedVertexData->GetTexcoords();
-
-				// [rika]: add more triangles
-				smd->AddMeshCapacity(meshData.vertCount, meshData.indexCount / 3u);
-
-				const ModelMaterialData_t* const materialData = parsedData->pMaterial(meshData.materialId);
-
-				// [rika]: making the choice to use the stored rmdl name here when possible, as that is what it was likely compiled with
-				const char* material = materialData->GetName(true);
-				assertm(material, "material name should always be valid");
-
-				material = g_rsxSettings.exportModelMatsTruncated ? material : GetStringAfterLastSlash(material);
-
-				for (uint32_t vertexIdx = 0; vertexIdx < meshData.vertCount; vertexIdx++)
-				{
-					smd::Vertex vertex;
-					ParseVertexIntoSMD(&vertices[vertexIdx], weights, &vertex, isStaticProp, meshData.texcoordCount, texcoords, vertexIdx);
-
-					smd->InitVertex(&vertex);
-				}
-
-				for (uint32_t indiceIdx = 0; indiceIdx < meshData.indexCount; indiceIdx += 3)
-				{
-					const uint16_t indice0 = indices[indiceIdx];
-					const uint16_t indice1 = indices[indiceIdx + 1];
-					const uint16_t indice2 = indices[indiceIdx + 2];
-
-					// order of indices is odd
-					smd->InitLocalTriangle(material, indice0, indice2, indice1);
-				}
+				smd->InitVertex(&vertex);
 			}
 
-			smd->Write(buf->Buffer(), managedBufferSize);
-			smd->ResetMeshData();
+			for (uint32_t indiceIdx = 0; indiceIdx < pMesh->indexCount; indiceIdx += 3)
+			{
+				const uint16_t indice0 = indices[indiceIdx];
+				const uint16_t indice1 = indices[indiceIdx + 1];
+				const uint16_t indice2 = indices[indiceIdx + 2];
+
+				// order of indices is odd
+				smd->InitLocalTriangle(material, indice0, indice2, indice1);
+			}
 		}
 	}
 
-	FreeAllocVar(smd);
+	CManagedBuffer* const buf = g_BufferManager.ClaimBuffer();
+
+	smd->Write(buf->Buffer(), managedBufferSize);
+	smd->ResetMeshData();
+
 	g_BufferManager.RelieveBuffer(buf);
 
 	return true;
 }
 
+typedef void (*ModelUpdatePathFunc_t)(void* const, const std::filesystem::path&);
+
+void ExportModelUpdatePath_RMAX(void* const file, const std::filesystem::path& exportPath)
+{
+	rmax::RMAXExporter* const rmax = reinterpret_cast<rmax::RMAXExporter* const>(file);
+	rmax->SetPath(exportPath);
+
+	if (!CreateDirectories(exportPath))
+	{
+		assertm(false, "Failed to create directory.");
+	}
+}
+
+void ExportModelUpdatePath_CAST(void* const file, const std::filesystem::path& exportPath)
+{
+	cast::CastExporter* const cast = reinterpret_cast<cast::CastExporter* const>(file);
+	cast->SetPath(exportPath);
+
+	if (!CreateDirectories(exportPath))
+	{
+		assertm(false, "Failed to create directory.");
+	}
+}
+
+void ExportModelUpdatePath_SMD(void* const file, const std::filesystem::path& exportPath)
+{
+	smd::CStudioModelData* const smd = reinterpret_cast<smd::CStudioModelData* const>(file);
+	smd->SetPath(exportPath);
+
+	if (!CreateDirectories(exportPath))
+	{
+		assertm(false, "Failed to create directory.");
+	}
+}
+
+typedef void* (*ModelSetupFunc_t)(const ModelParsedData_t* const, const char* const, const char* const);
+//typedef void (*ModelCleanupFunc_t)(void* const);
+typedef bool (*ModelExportFunc_t)(const ModelParsedData_t* const, const ModelMaterialExportMap_t* const, const ModelModelData_t* const, const int, void* const, const char* const);
+
+// to cpp
+static ModelSetupFunc_t s_Model3DSetupFuncs[eModelExportSetting::MODEL_FMT_3D_COUNT] =
+{
+	&ExportModelSetupCAST,
+	&ExportModelSetupRMAX,
+	&ExportModelSetupSMD,
+};
+
+ModelUpdatePathFunc_t s_Model3DUpdatePathFuncs[eModelExportSetting::MODEL_FMT_3D_COUNT] =
+{
+	&ExportModelUpdatePath_CAST,
+	&ExportModelUpdatePath_RMAX,
+	&ExportModelUpdatePath_SMD,
+};
+
+static ModelExportFunc_t s_Model3DExportFuncs[eModelExportSetting::MODEL_FMT_3D_COUNT] =
+{
+	&ExportModelCAST,
+	&ExportModelRMAX,
+	&ExportModelSMD
+};
+
+bool ExportModelMeshes(const ModelParsedData_t* const parsedData, std::filesystem::path& exportPath, const int setting, const int version)
+{
+	const bool exportQC = setting == eModelExportSetting::MODEL_SMD ? true : false;
+	const bool lodAsModel = setting == eModelExportSetting::MODEL_SMD ? false : true;
+
+	assertm(setting < eModelExportSetting::MODEL_FMT_3D_COUNT, "unimplemented 3d format");
+
+	if (exportQC)
+	{
+		ExportModelQC(parsedData, exportPath, setting, version);
+	}
+
+	const std::string fileStem = exportPath.stem().string();
+	const std::string filePath = exportPath.parent_path().string();
+
+	void* const file = s_Model3DSetupFuncs[setting](parsedData, filePath.c_str(), fileStem.c_str());
+
+	if (parsedData->LODCount())
+	{
+		// [rika]: parse materials taking the skin into account
+		ModelMaterialExportMap_t materials;
+		{
+			std::filesystem::path texturePath(filePath);
+			texturePath.append(fileStem);
+			HandleModelMaterials(parsedData, materials, texturePath);
+		}
+
+		if (lodAsModel)
+		{
+			for (int i = 0; i < parsedData->LODCount(); i++)
+			{
+				const ModelLODData_t* const pLOD = parsedData->pLOD(i);
+
+				char nameBuffer[MAX_PATH];
+				snprintf(nameBuffer, MAX_PATH, "%s_LOD%i\0", fileStem.c_str(), i);
+
+				if (s_Model3DExportFuncs[setting](parsedData, &materials, pLOD->models, pLOD->numModels, file, nameBuffer) == false)
+				{
+					assertm(false, "model export failed");
+					return false;
+				}
+			}
+		}
+		else
+		{
+			// [rika]: we are changing the base path, could cause issue if used after
+			exportPath.remove_filename();
+			exportPath.append(fileStem);
+			s_Model3DUpdatePathFuncs[setting](file, exportPath);
+
+			for (int i = 0; i < parsedData->LODCount(); i++)
+			{
+				const ModelLODData_t* const pLOD = parsedData->pLOD(i);
+
+				for (uint32_t model = 0; model < pLOD->GetModelCount(); model++)
+				{
+					const ModelModelData_t* const pModel = pLOD->pModel(model);
+
+					if (s_Model3DExportFuncs[setting](parsedData, &materials, pModel, 1, file, pModel->name) == false)
+					{
+						assertm(false, "model export failed");
+						return false;
+					}
+				}
+			}
+		}
+	}
+
+	switch (setting)
+	{
+	case eModelExportSetting::MODEL_CAST:
+	{
+		cast::CastExporter* const cast = reinterpret_cast<cast::CastExporter* const>(file);
+		FreeAllocVar(cast);
+
+		break;
+	}
+	case eModelExportSetting::MODEL_RMAX:
+	{
+		rmax::RMAXExporter* const rmax = reinterpret_cast<rmax::RMAXExporter* const>(file);
+		FreeAllocVar(rmax);
+
+		break;
+	}
+	case eModelExportSetting::MODEL_SMD:
+	{
+		smd::CStudioModelData* const smd = reinterpret_cast<smd::CStudioModelData* const>(file);
+		FreeAllocVar(smd);
+
+		break;
+	}
+	default:
+		break;
+	}
+
+	return true;
+}
+
 // export a seqdesc to rmax
-bool ExportSeqDescRMAX(const ModelSeq_t* const seqdesc, std::filesystem::path& exportPath, const char* const skelName, const std::vector<ModelBone_t>* const bones)
+bool ExportSeqDescRMAX(const ModelSeq_t* const seqdesc, std::filesystem::path& exportPath, const char* const skelName, const ModelParsedData_t* const rig)
 {
 	const std::string fileNameBase = exportPath.stem().string();
 	const std::string skelNameBase = std::filesystem::path(skelName).stem().string();
 
-	const size_t boneCount = bones->size();
+	const size_t boneCount = rig->BoneCount();
 
 	for (int animIdx = 0; animIdx < seqdesc->AnimCount(); animIdx++)
 	{
@@ -1590,8 +3343,11 @@ bool ExportSeqDescRMAX(const ModelSeq_t* const seqdesc, std::filesystem::path& e
 
 		// do bones
 		rmaxFile.ReserveBones(boneCount);
-		for (auto& bone : *bones)
-			rmaxFile.AddBone(bone.name, bone.parent, bone.pos, bone.quat, bone.scale);
+		for (int i = 0; i < boneCount; i++)
+		{
+			const ModelBone_t* const bone = rig->pBone(i);
+			rmaxFile.AddBone(bone->name, bone->parent, bone->pos, bone->quat, bone->scale);
+		}
 
 		const ModelAnim_t* const animdesc = seqdesc->anims + animIdx; // check flag 0x20000
 
@@ -1650,21 +3406,21 @@ bool ExportSeqDescRMAX(const ModelSeq_t* const seqdesc, std::filesystem::path& e
 }
 
 // export a seq desc to cast
-bool ExportSeqDescCast(const ModelSeq_t* const seqdesc, std::filesystem::path& exportPath, const char* const skelName, const std::vector<ModelBone_t>* const bones, const uint64_t guid)
+bool ExportSeqDescCast(const ModelSeq_t* const seqdesc, std::filesystem::path& exportPath, const char* const skelName, const ModelParsedData_t* const rig, const uint64_t guid)
 {
 	const std::string fileNameBase = exportPath.stem().string();
 	const std::string skelNameBase = std::filesystem::path(skelName).stem().string();
 
-	const size_t boneCount = bones->size();
+	const size_t boneCount = rig->BoneCount();
 
 	for (int animIdx = 0; animIdx < seqdesc->AnimCount(); animIdx++)
 	{
 		const ModelAnim_t* const animdesc = seqdesc->anims + animIdx;
 
 		const std::string tmpName(std::format("{}_{}.cast", fileNameBase, std::to_string(animIdx)));
-		exportPath.replace_filename(tmpName);
+		//exportPath.replace_filename(tmpName);
 
-		cast::CastExporter cast(exportPath.string());
+		cast::CastExporter cast(exportPath, tmpName.c_str(), guid);
 
 		// cast
 		cast::CastNode* const rootNode = cast.GetChild(0); // we only have one root node, no hash
@@ -1685,9 +3441,9 @@ bool ExportSeqDescCast(const ModelSeq_t* const seqdesc, std::filesystem::path& e
 			skelNode->ReserveChildren(boneCount);
 
 			// uses hashes for lookup, still gets bone parents by index :clown:
-			for (size_t i = 0; i < boneCount; i++)
+			for (int i = 0; i < boneCount; i++)
 			{
-				const ModelBone_t* const boneData = &bones->at(i);
+				const ModelBone_t* const boneData = rig->pBone(i);
 
 				cast::CastNodeBone boneNode(skelNode);
 				boneNode.MakeBone(boneData->name, boneData->parent, &boneData->pos, &boneData->quat, false);
@@ -1717,7 +3473,7 @@ bool ExportSeqDescCast(const ModelSeq_t* const seqdesc, std::filesystem::path& e
 
 		for (int i = 0; i < boneCount; i++)
 		{
-			const ModelBone_t* const boneData = &bones->at(i);
+			const ModelBone_t* const boneData = rig->pBone(i);
 
 			// parsed data
 			const uint8_t flags = animData.GetFlag(i);
@@ -1777,21 +3533,21 @@ bool ExportSeqDescCast(const ModelSeq_t* const seqdesc, std::filesystem::path& e
 	return true;
 }
 
-bool ExportSeqDescSMD(const ModelSeq_t* const seqdesc, std::filesystem::path& exportPath, const char* const skelName, const std::vector<ModelBone_t>* const bones)
+bool ExportSeqDescSMD(const ModelSeq_t* const seqdesc, std::filesystem::path& exportPath, const char* const skelName, const ModelParsedData_t* const rig)
 {
 	const std::string fileNameBase = exportPath.stem().string();
 	const std::string skelNameBase = std::filesystem::path(skelName).stem().string();
 
-	const size_t boneCount = bones->size();
+	const size_t boneCount = rig->BoneCount();
 
-	smd::CStudioModelData* const smd = new smd::CStudioModelData(exportPath.parent_path(), bones->size(), 1ull);
+	smd::CStudioModelData* const smd = new smd::CStudioModelData(exportPath.parent_path(), rig->BoneCount(), 1ull);
 
 	// [rika]: initialize the nodes
-	for (size_t i = 0; i < boneCount; i++)
+	for (int i = 0; i < boneCount; i++)
 	{
-		const ModelBone_t& bone = bones->at(i);
+		const ModelBone_t* const bone = rig->pBone(i);
 
-		smd->InitNode(bone.name, static_cast<int>(i), bone.parent);
+		smd->InitNode(bone->name, static_cast<int>(i), bone->parent);
 	}
 
 	const Vector deltaPos(0.0f, 0.0f, 0.0f);
@@ -1824,7 +3580,7 @@ bool ExportSeqDescSMD(const ModelSeq_t* const seqdesc, std::filesystem::path& ex
 		{
 			for (int bone = 0; bone < boneCount; bone++)
 			{
-				const ModelBone_t* const boneData = &bones->at(bone);
+				const ModelBone_t* const boneData = rig->pBone(bone);
 
 				// parsed data
 				const uint8_t flags = animData.GetFlag(bone);
@@ -1860,22 +3616,21 @@ bool ExportSeqDescSMD(const ModelSeq_t* const seqdesc, std::filesystem::path& ex
 	return true;
 }
 
-bool ExportSeqDesc(const int setting, const ModelSeq_t* const seqdesc, std::filesystem::path& exportPath, const char* const skelName, const std::vector<ModelBone_t>* const bones, const uint64_t guid)
+bool ExportSeqDesc(const int setting, const ModelSeq_t* const seqdesc, std::filesystem::path& exportPath, const char* const skelName, const ModelParsedData_t* const rig, const uint64_t guid)
 {
 	switch (setting)
 	{
-
 	case eAnimSeqExportSetting::ANIMSEQ_CAST:
 	{
-		return ExportSeqDescCast(seqdesc, exportPath, skelName, bones, guid);
+		return ExportSeqDescCast(seqdesc, exportPath, skelName, rig, guid);
 	}
 	case eAnimSeqExportSetting::ANIMSEQ_RMAX:
 	{
-		return ExportSeqDescRMAX(seqdesc, exportPath, skelName, bones);
+		return ExportSeqDescRMAX(seqdesc, exportPath, skelName, rig);
 	}
 	case eAnimSeqExportSetting::ANIMSEQ_SMD:
 	{
-		return ExportSeqDescSMD(seqdesc, exportPath, skelName, bones);
+		return ExportSeqDescSMD(seqdesc, exportPath, skelName, rig);
 	}
 	case eAnimSeqExportSetting::ANIMSEQ_RSEQ:
 	{
@@ -1888,8 +3643,6 @@ bool ExportSeqDesc(const int setting, const ModelSeq_t* const seqdesc, std::file
 	}
 	}
 }
-
-#if defined(HAS_BONED_MODELS)
 
 void CalcMatrixForBone_Unparented(const DXBone_t& bone, XMMATRIX& matOut)
 {
@@ -1908,6 +3661,9 @@ void CalcMatrixForBone_Unparented(const DXBone_t& bone, XMMATRIX& matOut)
 //
 void UpdateModelBoneMatrix(CDXDrawData* const drawData)
 {
+	if (!drawData->boneMatrixBuffer)
+		return;
+
 	ID3D11DeviceContext* const ctx = g_dxHandler->GetDeviceContext();
 
 	D3D11_MAPPED_SUBRESOURCE resource;
@@ -1995,7 +3751,7 @@ void InitModelBoneMatrix(CDXDrawData* const drawData, ModelParsedData_t* const p
 
 	D3D11_BUFFER_DESC desc{};
 
-	desc.ByteWidth = static_cast<UINT>(parsedData->bones.size()) * sizeof(XMMATRIX);
+	desc.ByteWidth = static_cast<UINT>(parsedData->BoneCount()) * sizeof(XMMATRIX);
 	desc.StructureByteStride = sizeof(XMMATRIX);
 
 	// make sure this buffer can be updated every frame
@@ -2020,7 +3776,7 @@ void InitModelBoneMatrix(CDXDrawData* const drawData, ModelParsedData_t* const p
 	srvDesc.Format = DXGI_FORMAT_UNKNOWN;
 	srvDesc.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
 	srvDesc.Buffer.FirstElement = 0;
-	srvDesc.Buffer.NumElements = static_cast<UINT>(parsedData->bones.size());
+	srvDesc.Buffer.NumElements = static_cast<UINT>(parsedData->BoneCount());
 
 	hr = device->CreateShaderResourceView(drawData->boneMatrixBuffer, &srvDesc, &drawData->boneMatrixSRV);
 
@@ -2031,14 +3787,12 @@ void InitModelBoneMatrix(CDXDrawData* const drawData, ModelParsedData_t* const p
 		return;
 #endif
 
-	drawData->bones.resize(parsedData->bones.size());
+	drawData->bones.resize(parsedData->BoneCount());
 
-	size_t i = 0;
-	for (auto& bone : parsedData->bones)
+	for (int i = 0; i < parsedData->BoneCount(); i++)
 	{
-		drawData->bones.at(i) = DXBone_t(bone.name, bone.pos, bone.quat, bone.scale, bone.parent);
-
-		i++;
+		const ModelBone_t* const pBone = parsedData->pBone(i);
+		drawData->bones.at(i) = DXBone_t(pBone->name, pBone->pos, pBone->quat, pBone->scale, pBone->parent);
 	}
 
 	CalculateBonesInverseBindMatrix(drawData);
@@ -2050,14 +3804,14 @@ void InitModelBoneMatrix(CDXDrawData* const drawData, ModelParsedData_t* const p
 static void ModelPreview_ResetPose(const ModelParsedData_t* const parsedData, CDXDrawData* const drawData)
 {
 	// get our bones back!
-	for (size_t i = 0; i < drawData->bones.size(); i++)
+	for (int i = 0; i < drawData->bones.size(); i++)
 	{
-		const ModelBone_t& originalBone = parsedData->bones.at(i);
+		const ModelBone_t* const originalBone = parsedData->pBone(i);
 		DXBone_t& bone = drawData->bones.at(i);
 
-		bone.pos = originalBone.pos;
-		bone.quat = originalBone.quat;
-		bone.scale = originalBone.scale;
+		bone.pos = originalBone->pos;
+		bone.quat = originalBone->quat;
+		bone.scale = originalBone->scale;
 	}
 }
 
@@ -2080,18 +3834,18 @@ static void ModelPreview_AnimFrame(AnimState_t* const state, const SeqPreviewEnt
 		// placeholder value of -1 means that the bone has no mapping to the animation's skeleton
 		state->boneRemap.assign(drawData->bones.size(), -1);
 
-		const std::vector<ModelBone_t>& srcBones = *entry->srcBones;
+		const ModelParsedData_t* const srcBones = entry->srcBones;
 
 		// find each of our model's bones in the animation's skeleton
 		// i thought that they would match up but apparently not so that's super fun!
 		// i'm sure this isn't the right way of doing it but it's good enough for now
 		for (size_t i = 0; i < drawData->bones.size(); ++i)
 		{
-			for (size_t j = 0; j < srcBones.size(); ++j)
+			for (int j = 0; j < srcBones->BoneCount(); ++j)
 			{
-				if (!_stricmp(drawData->bones.at(i).name, srcBones.at(j).name))
+				if (!_stricmp(drawData->bones.at(i).name, srcBones->pBone(j)->pszName()))
 				{
-					state->boneRemap.at(i) = static_cast<int>(j);
+					state->boneRemap.at(i) = j;
 					break;
 				}
 			}
@@ -2315,12 +4069,13 @@ bool Preview_SequencesSection(ModelPreviewInfo_t* const info, const ModelParsedD
 	// if we clicked refresh then the caller needs to reparse the data so let them know!
 	return refreshRequested;
 }
-#endif
 
-void* PreviewParsedData(ModelPreviewInfo_t* const info, ModelParsedData_t* const parsedData, char* const assetName, const uint64_t assetGUID, const bool firstFrameForAsset)
+void* PreviewParsedData(ModelPreviewInfo_t* const info, ModelParsedData_t* const parsedData, const char* const assetName, const uint64_t assetGUID, const bool firstFrameForAsset)
 {
 	// [rika]: set up CDXDrawData
 	g_currentPreviewDrawData.CheckForMonitorChange();
+
+	const ModelLODData_t* const pLOD = parsedData->pLOD(info->selectedLODLevel);
 
 	if (assetGUID != g_currentPreviewDrawData.guid || g_currentPreviewDrawData.GetDrawData() == nullptr || info->selectedLODLevel != g_currentPreviewDrawData.activeLODLevel)
 	{
@@ -2329,7 +4084,7 @@ void* PreviewParsedData(ModelPreviewInfo_t* const info, ModelParsedData_t* const
 		CDXDrawData* const drawData = new CDXDrawData();
 
 		// this leaks mem?
-		drawData->meshBuffers.resize(parsedData->lods.at(info->selectedLODLevel).meshes.size());
+		drawData->meshBuffers.resize(pLOD->GetMeshCount());
 		drawData->modelName = assetName;
 		drawData->dataType = CDXDrawData::DrawDataType_e::MODEL;
 
@@ -2343,21 +4098,17 @@ void* PreviewParsedData(ModelPreviewInfo_t* const info, ModelParsedData_t* const
 	if (!drawData)
 		return nullptr;
 
-	drawData->vertexShader = g_dxHandler->GetShaderManager()->LoadShaderFromString("shaders/model_vs", s_PreviewVertexShader, eShaderType::Vertex);
-	drawData->pixelShader = g_dxHandler->GetShaderManager()->LoadShaderFromString("shaders/model_ps", s_PreviewPixelShader, eShaderType::Pixel);
-
 	// [rika]: do the preview stuff here!
-	assertm(parsedData->lods.size() > 0, "no lods in preview?");
-	const ModelLODData_t& lodData = parsedData->lods.at(info->selectedLODLevel);
+	assertm(parsedData->LODCount() > 0, "no lods in preview?");
 
-	ImGui::Text("Bones: %llu", parsedData->bones.size());
-	ImGui::Text("LODs: %llu", parsedData->lods.size());
-	ImGui::Text("Local Sequences: %i", parsedData->NumLocalSeq());
+	ImGui::Text("Bones: %llu", parsedData->BoneCount());
+	ImGui::Text("LODs: %llu", parsedData->LODCount());
+	ImGui::Text("Local Sequences: %i", parsedData->LocalSeqCount());
 
 	if (info->minLODIndex != info->maxLODIndex)
 		ImGui::SliderScalar("LOD Level", ImGuiDataType_U8, &info->selectedLODLevel, &info->minLODIndex, &info->maxLODIndex);
 
-	if (parsedData->skins.size())
+	if (parsedData->SkinCount())
 	{
 		ImGui::TextUnformatted("Skins:");
 		ImGui::SameLine();
@@ -2369,16 +4120,16 @@ void* PreviewParsedData(ModelPreviewInfo_t* const info, ModelParsedData_t* const
 
 		if (ImGui::BeginCombo("##SKins", label, ImGuiComboFlags_NoArrowButton))
 		{
-			for (size_t i = 0; i < parsedData->skins.size(); i++)
+			for (int i = 0; i < parsedData->SkinCount(); i++)
 			{
-				const ModelSkinData_t& skin = parsedData->skins.at(i);
+				const ModelSkinData_t* const pSkin = parsedData->pSkin(i);
 
 				const bool isSelected = info->selectedSkinIndex == i || (firstFrameForAsset && info->selectedSkinIndex == info->lastSelectedSkinIndex);
 
-				if (ImGui::Selectable(skin.name, isSelected))
+				if (ImGui::Selectable(pSkin->name, isSelected))
 				{
 					info->selectedSkinIndex = i;
-					label = skin.name;
+					label = pSkin->name;
 				}
 
 				if (isSelected) ImGui::SetItemDefaultFocus();
@@ -2389,7 +4140,7 @@ void* PreviewParsedData(ModelPreviewInfo_t* const info, ModelParsedData_t* const
 	}
 
 
-	if (parsedData->bodyParts.size())
+	if (parsedData->BodypartCount())
 	{
 		ImGui::TextUnformatted("Bodypart:");
 		ImGui::SameLine();
@@ -2397,20 +4148,20 @@ void* PreviewParsedData(ModelPreviewInfo_t* const info, ModelParsedData_t* const
 		// [rika]: previous implemention was loading an invalid string upon loading different files without closing the tool
 		static const char* bodypartLabel = nullptr;
 		if (firstFrameForAsset)
-			bodypartLabel = parsedData->bodyParts.at(0).GetNameCStr();
+			bodypartLabel = parsedData->pBodypart(0)->GetName();
 
 		if (ImGui::BeginCombo("##Bodypart", bodypartLabel, ImGuiComboFlags_NoArrowButton))
 		{
-			for (size_t i = 0; i < parsedData->bodyParts.size(); i++)
+			for (size_t i = 0; i < parsedData->BodypartCount(); i++)
 			{
-				const ModelBodyPart_t& bodypart = parsedData->bodyParts.at(i);
+				const ModelBodyPart_t* const pBodypart = parsedData->pBodypart(i);
 
 				const bool isSelected = info->selectedBodypartIndex == i || (firstFrameForAsset && info->selectedBodypartIndex == info->lastSelectedBodypartIndex);
 
-				if (ImGui::Selectable(bodypart.GetNameCStr(), isSelected))
+				if (ImGui::Selectable(pBodypart->GetName(), isSelected))
 				{
 					info->selectedBodypartIndex = i;
-					bodypartLabel = bodypart.GetNameCStr();
+					bodypartLabel = pBodypart->GetName();
 				}
 
 				if (isSelected) ImGui::SetItemDefaultFocus();
@@ -2420,20 +4171,20 @@ void* PreviewParsedData(ModelPreviewInfo_t* const info, ModelParsedData_t* const
 		}
 
 		// If the selected bodypart index is out of range, reset it to 0 to prevent an exception
-		if (info->selectedBodypartIndex >= parsedData->bodyParts.size())
+		if (info->selectedBodypartIndex >= parsedData->BodypartCount())
 			info->selectedBodypartIndex = 0;
 
-		if (info->selectedSkinIndex >= parsedData->skins.size())
+		if (info->selectedSkinIndex >= parsedData->SkinCount())
 			info->selectedSkinIndex = 0;
 
-		if (info->selectedLODLevel >= parsedData->lods.size())
+		if (info->selectedLODLevel >= parsedData->LODCount())
 			info->selectedLODLevel = 0;
 
 		g_rsxSettings.previewedSkinIndex = static_cast<int>(info->selectedSkinIndex);
 
-		if (parsedData->bodyParts.at(info->selectedBodypartIndex).numModels > 1)
+		const ModelBodyPart_t* const pBodypart = parsedData->pBodypart(info->selectedBodypartIndex);
+		if (pBodypart->GetModelCount() > 1)
 		{
-			const ModelBodyPart_t& bodypart = parsedData->bodyParts.at(info->selectedBodypartIndex);
 			size_t& selectedModelIndex = info->bodygroupModelSelected.at(info->selectedBodypartIndex);
 
 			ImGui::TextUnformatted("Model:");
@@ -2443,15 +4194,15 @@ void* PreviewParsedData(ModelPreviewInfo_t* const info, ModelParsedData_t* const
 
 			// update label if our bodypart changes
 			if (info->selectedBodypartIndex != info->lastSelectedBodypartIndex || firstFrameForAsset)
-				label = lodData.models.at(bodypart.modelIndex + selectedModelIndex).name.c_str();
+				label = pLOD->pModel(static_cast<uint32_t>(selectedModelIndex + pBodypart->modelIndex))->name;
 
 			if (ImGui::BeginCombo("##Model", label, ImGuiComboFlags_NoArrowButton))
 			{
-				for (int i = 0; i < bodypart.numModels; i++)
+				for (int i = 0; i < pBodypart->GetModelCount(); i++)
 				{
 					const bool isSelected = selectedModelIndex == i;
 
-					const char* tmp = lodData.models.at(bodypart.modelIndex + i).name.c_str();
+					const char* tmp = pLOD->pModel(pBodypart->modelIndex + i)->name;
 					if (ImGui::Selectable(tmp, isSelected))
 					{
 						selectedModelIndex = static_cast<size_t>(i);
@@ -2474,22 +4225,20 @@ void* PreviewParsedData(ModelPreviewInfo_t* const info, ModelParsedData_t* const
 #endif
 	const CShader* const pixelShader = g_dxHandler->GetShaderManager()->LoadShaderFromString("shaders/model_ps", s_PreviewPixelShader, eShaderType::Pixel);
 
-	const ModelSkinData_t& skinData = parsedData->skins.at(info->selectedSkinIndex);
-	for (size_t i = 0; i < lodData.meshes.size(); ++i)
+	const ModelSkinData_t* const pSkinData = parsedData->pSkin(static_cast<int>(info->selectedSkinIndex));
+	for (uint32_t i = 0; i < pLOD->GetMeshCount(); ++i)
 	{
-		const ModelMeshData_t& mesh = lodData.meshes.at(i);
+		const ModelMeshData_t& mesh = pLOD->Mesh(i);
 		DXMeshDrawData_t* const meshDrawData = &drawData->meshBuffers[i];
 
 		meshDrawData->indexFormat = DXGI_FORMAT_R16_UINT; // uint16_t
 		meshDrawData->wireframe = false;
 
-		// If this mesh belongs to a bodypart that is not selected, we should set it to be invisible
-		drawData->meshBuffers[i].visible = parsedData->bodyParts[mesh.bodyPartIndex].IsPreviewEnabled();
-
-		const ModelBodyPart_t& bodypart = parsedData->bodyParts[mesh.bodyPartIndex];
-		const ModelModelData_t& model = lodData.models.at(bodypart.modelIndex + info->bodygroupModelSelected.at(mesh.bodyPartIndex));
+		const ModelBodyPart_t* const pBodypart = parsedData->pBodypart(mesh.bodyPartIndex);
+		const ModelModelData_t* const pModel = pLOD->pModel(static_cast<int>(info->bodygroupModelSelected.at(mesh.bodyPartIndex)) + pBodypart->modelIndex);
 		
-		if (i >= model.meshIndex && i < model.meshIndex + model.meshCount)
+		const int64_t meshIndex = pModel->meshes - pLOD->meshes;
+		if (i >= meshIndex && i < meshIndex + pModel->meshCount)
 			drawData->meshBuffers[i].visible = true;
 		else
 			drawData->meshBuffers[i].visible = false;
@@ -2502,7 +4251,7 @@ void* PreviewParsedData(ModelPreviewInfo_t* const info, ModelParsedData_t* const
 
 		// the rest of this loop requires the material to be valid
 		// so if it isn't just continue to the next iteration
-		CPakAsset* const matlAsset = parsedData->materials.at(skinData.indices[mesh.materialId]).asset;
+		CPakAsset* const matlAsset = parsedData->pMaterial(pSkinData->indices[mesh.materialId])->asset;
 		if (!matlAsset)
 			continue;
 
@@ -2554,11 +4303,9 @@ void* PreviewParsedData(ModelPreviewInfo_t* const info, ModelParsedData_t* const
 		}
 	}
 
-#if defined(HAS_BONED_MODELS)
 	// Map some (potentially incorrect) bone data
 	if (!drawData->boneMatrixBuffer)
 		InitModelBoneMatrix(drawData, parsedData);
-#endif
 
 	Preview_MapTransformsBuffer(drawData);
 	Preview_MapModelInstanceBuffer(drawData);
