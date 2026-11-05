@@ -11,7 +11,9 @@
 #include <misc/imgui_utility.h>
 #include <imgui.h>
 
+#if !defined(NO_OPUS) // Release_NoGui has no vcpkg opus
 #include <opusenc.h>
+#endif
 #include <core/version.h>
 
 constexpr const char* PATH_PREFIX_ASRC = "audio";
@@ -471,6 +473,10 @@ bool ExportAudioSourceAsset(CAsset* const asset, const int setting)
 	}
 	else
 	{
+#if defined(NO_OPUS)
+		Log("OPUS: not available in this build (NO_OPUS), skipping source \"%s\"\n", audioAsset->GetAssetName().c_str());
+		return false;
+#else
 		// wav -> vorbis
 		const std::unordered_map<uint16_t, std::vector<uint8_t>> channelRemapIndices = {
 			/* mono          */ {1, {0}},
@@ -564,6 +570,7 @@ bool ExportAudioSourceAsset(CAsset* const asset, const int setting)
 		ope_encoder_drain(enc);
 		ope_encoder_destroy(enc);
 		ope_comments_destroy(comments);
+#endif
 	}
 
 	return true;
