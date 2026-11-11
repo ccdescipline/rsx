@@ -366,3 +366,15 @@ radaudio.lib
 binka_ue_decode_*.lib
 
 vcpkg_installed/*
+
+# Apex export outputs (tools/export_*.py)
+/exported/
+/exported_*/
+/exported_maps*/
+/exported_props_physics/
+/exported_player_settings/
+/exported_seasons/
+/collision_maps/
+/weapon_scripts/
+/navdemo_portable/
+/.tmp_weapon_export/
