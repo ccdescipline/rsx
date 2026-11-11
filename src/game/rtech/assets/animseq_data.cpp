@@ -126,12 +126,11 @@ void ParseAnimSeqDataForSeq(ModelSeq_t* const seqdesc, const size_t boneCount, c
 			const uint8_t boneFlags = ANIM_BONEFLAG_FLAG(boneFlagArray, bone, flagWidth, flagBitOffset);
 
 			// no header for this bone
-			if ((boneFlags & r5::RleBoneFlags_t::STUDIO_ANIM_MASK_RELEASE) == false)
+			if (boneFlags & r5::RleBoneFlags_t::STUDIO_ANIM_MASK_RELEASE)
 			{
-				continue;
+				panim = panim->pNext();
 			}
 
-			panim = panim->pNext();
 			flagBitOffset += flagWidth;
 		}
 
