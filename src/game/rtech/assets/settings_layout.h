@@ -173,14 +173,14 @@ public:
 	SettingsFieldMap_t* fieldMap;
 	uint32_t hashTableSize; // Must always be a power of 2.
 	uint32_t fieldCount;
-	uint32_t extraDataSizeIndex; // Indexes into s_settingsBlockExtraDataSize (see r5reloaded [r5apex.exe + 0x5C2417]).
+	uint32_t extraDataSizeIndex; // engine: settingsAssetType. 0 = player settings (FinalizeSettingsBlock runs PlayerSettingsBlockInit), 1 = other.
 	uint32_t hashStepScale;
 	uint32_t hashSeed;
 
 	// Always 1 for non-array layouts, and -1 for dynamic arrays. Static arrays can be >=1
 	int arrayValueCount;
 
-	uint32_t totalLayoutSize;
+	uint32_t totalLayoutSize; // engine dataSize: bytes per element, also the array element stride
 	uint32_t unk_34;
 	uint32_t alignment;
 	char* stringData; // contains all the field names

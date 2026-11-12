@@ -6,9 +6,12 @@
 
 训练场上碰不到、换大图才会出错的（navdemo 代码要改）：
 
-1. **道具下标取低 31 位**：`leaf_dword & 0x7FFFFFFF`，不能 `& 0xFFFF`。训练场 10957 个实例，第 16–30 位都是 0，所以看不出来；`mp_rr_olympus_mu3` 有 466427 个实例，下标用到第 18 位。第 31 位仍是 detail 1 标志。
+1. **道具下标取低 24 位**：`leaf_dword & 0xFFFFFF`（引擎 `StaticProp_Trace` 就是这么取的），不能 `& 0xFFFF`。训练场 10957 个实例，看不出差别；`mp_rr_olympus_mu3` 有 466427 个实例，下标用到第 18 位。第 24–31 位是引擎拷进 trace 结果的一个字节，不属于下标；其中第 31 位是 detail 1 标志。之前文档写的 `& 0x7FFFFFFF` 在现有数据上结果一样（第 24–30 位都是 0），但按引擎应该用 24 位。
 2. **节点包围盒的还原系数**：`q × decodeScale × 65536`，decodeScale 在 `000E` 第 0 个 dmodel 的 `+60`。训练场是 2⁻¹⁵（×2），`olympus_mu3` 是 2⁻¹⁴（×4）。写死 ×2 的地方要改。
 3. **遍历世界 BVH 从 worldspawn 根节点开始**：从节点 0 出发，沿子类型 0（NODE）往下走。不要线性扫整个 `0012`：里面还有别的 brush 模型的树，它们的子下标相对自己的 `bvhNode` / `bvhLeaf` 基址，当成 worldspawn 读会越界（`olympus_mu3` 上就越界了）。
+3a. **packed 顶点是有符号 int16**：类型 5/7/8 的顶点 `origin + q × 65536 × decodeScale`，q 按**有符号**读。worldspawn 用 `0003` 还是 `0014` 看 `map_info.txt` 的 `worldspawn_bvh_flags` 第 0 位，起点是 `worldspawn_vert_index`。
+3b. **地形 heightfield（子类型 10）**：引擎的世界碰撞还包括 `0015`（heightfield）/`0016`（高度采样）。现在交付里多了 `props_world/<bsp>_terrain_collision.stl`（世界坐标、空洞已去掉），map_info 里 `heightfields N`。N 为 0 的图没有地形碰撞，不用管；不为 0 的图 navdemo 要么读这个 STL，要么按 05 里的格式自己解。之前 navdemo 遇到类型 10 是直接跳过的话，这些图的地面会缺碰撞。
+3c. **道具 STL 要重新导**：rsx 之前把模型碰撞里的 packed 顶点按无符号解错了（见 05「模型碰撞的两档细节」末尾），用到 packed 顶点的模型 STL 位置不对。用 2026-11-12 之后的 rsx 重跑 `export_map_collision.py`。
 
 交付内容和训练场那份相比有变化的：
 
@@ -54,6 +57,7 @@ collision_maps/<map>/
   props/mdl/.../<模型>.stl       detail 0
   props/mdl/.../<模型>_d1.stl    detail 1（和 detail 0 是同一个 part 时不写）
   props_world/<bsp>_props_instances.csv
+  props_world/<bsp>_terrain_collision.stl      地形 heightfield（世界坐标），只有带 heightfield 的图才有
 ```
 
 训练场的那份在 `collision_example\`，布局相同，只是没有 `overview/`（地图包里没有这个文件）。下面这些不用再导，navdemo 不读：合并后的世界坐标 STL（`place_prop_collision.py --world-stl` 才写）、只被未引用实例用到的模型、`client_perm/`、`_pak_nostar/`、`staging_mdl_list.csv`。
@@ -66,12 +70,13 @@ STL 是模型坐标、不乘 scale 的二进制 STL。只给被世界 BVH 引用
 
 已经核对过的：
 
-- **道具下标**：`leaf_dword & 0x7FFFFFFF`。不能只取低 16 位，大图的实例数会超过 65536（`mp_rr_olympus_mu3` 有 466427 个）。
-- **玩家移动碰撞**：第 31 位为 1 的实例用 `<模型>_d1.stl`，没有就用 `<模型>.stl`；其余实例用 `<模型>.stl`，没有这个文件就没有移动碰撞。navdemo 那边按引擎代码确认过。
+- **道具下标**：`leaf_dword & 0xFFFFFF`（引擎取低 24 位）。不能只取低 16 位，大图的实例数会超过 65536（`mp_rr_olympus_mu3` 有 466427 个）。
+- **玩家移动碰撞**：第 31 位为 1 的实例用 `<模型>_d1.stl`，没有就用 `<模型>.stl`；其余实例用 `<模型>.stl`，没有这个文件就没有移动碰撞。navdemo 那边按引擎代码确认过。这是低精度查询的规则；引擎的完整选档规则（convar、HIGH 查询）见 05。
+- **地形**：`props_world/<bsp>_terrain_collision.stl`（只有 `map_info.txt` 里 `heightfields` 大于 0 的图才有）。
 - **摆放**：Source `AngleMatrix(pitch, yaw, roll)`，`世界 = origin + R × (scale × v)`。navdemo 用单模型网格加实例表自己拼，误差在 0.1 以内。
 - **节点包围盒**：`世界 = worldspawn 原点 + q × decodeScale × 65536`。原点在 `000E` 第 0 个 dmodel 的 `+48`，decodeScale 在 `+60`。训练场是 ×2，`olympus_mu3` 是 ×4，不能写死。
 - **小地图 ↔ 世界坐标**：`overview/wrap/resource/overviews/<map>.txt`（地图包里的 `resource/overviews/<map>.txt` 原样导出）。`pos_x` / `pos_y` 是图片左上角的世界坐标，`scale` 是世界单位/像素。`px = (x - pos_x) / scale`，`py = (pos_y - y) / scale`；反过来 `x = pos_x + px × scale`，`y = pos_y - py × scale`。这是**小地图图片的原点**，不是 BSP 的 worldspawn 原点（后者在 `000E` 的 `+48` / `+60`，用来还原 `0012`）。文件名按 pak/变体走，里面的根名字可能是基础图名（`mp_rr_canyonlands_hu_avt.txt` 的根是 `mp_rr_canyonlands_hu`）。
-- **`map_info.txt`**：`bsp`、`sprp_version`、`worldspawn_origin`、`worldspawn_decode_scale`、`node_bounds_step`（= decodeScale × 65536），有 overview 的图还有 `overview_pos_x` / `overview_pos_y` / `overview_scale`。还原节点包围盒和顶点直接用这几个数，不用自己从 `000E` 取。
+- **`map_info.txt`**：`bsp`、`sprp_version`、`worldspawn_origin`、`worldspawn_decode_scale`、`node_bounds_step`（= decodeScale × 65536）、`worldspawn_vert_index`、`worldspawn_bvh_flags`（第 0 位：顶点是 `0014` packed 还是 `0003` float）、`heightfields`（`0015` 里的地形块数）、`collision_lumps`（导出来的碰撞相关 lump），有 overview 的图还有 `overview_pos_x` / `overview_pos_y` / `overview_scale`。还原节点包围盒和顶点直接用这几个数，不用自己从 `000E` 取。
 
 ## 验收
 
@@ -106,7 +111,7 @@ navdemo 那边对训练场的核对结果：旧的合并 STL 三角数等于两�
 | `mp_rr_canyonlands_hu` | `--map mp_rr_canyonlands_hu_avt --server-pak mp_rr_canyonlands_hu_server_temp` | 客户端包在 `_avt` 变体下，BSP 名是 `mp_rr_canyonlands_hu_avt`，导航网格目录是 `navmesh/mp_rr_canyonlands_hu/`。只验过 lump |
 | `mp_rr_tropic_island_mu2` | `--map mp_rr_tropic_island_mu2_landscape --server-pak mp_rr_tropic_island_mu2_server_temp` | 同上，用 `_landscape` 变体（另有 `_hopscotch`）。变体和 `server_temp` 是否同一张图没核对 |
 | `mp_rr_olympus_mu2` | — | 客户端包只有 `(01)` 补丁，没有基础包，导不出 lump |
-| `mp_rr_arena_habitat` | — | rsx 解不出 `0002` / `000E` / `002D`：前约 300 字节像没解压的数据，后面是未初始化内存，每次导出都不一样。`0023` 为空。旧版 `rsx_nogui.exe` 也一样。脚本会在第 1 步停下 |
+| `mp_rr_arena_habitat` | — | 旧 rsx 解不出 `0002` / `000E` / `002D`：前约 300 字节像没解压的数据，后面是未初始化内存，每次导出都不一样。原因是 rsx 的 wrap 解压失败后把压缩数据原样返回、再按解压后大小写文件。2026-11-12 改成和引擎一样直接 `OodleLZ_Decompress`，失败就不写文件并在日志里打 `WRAP: Oodle decode failed ...`（带 flags 和两个大小）。**待复测** |
 | `mp_rr_arena_phase_runner`、`mp_rr_desertlands_hu`、`mp_rr_party_crasher` | — | 只有 server 包，没有客户端包 |
 
 `resource/overviews/<map>.txt` 大多数图都有，会导出到 `overview/`；训练场没有（地图包里没有这个文件）。
@@ -118,7 +123,7 @@ navdemo 那边对训练场的核对结果：旧的合并 STL 三角数等于两�
 - **rsx 版本**：要用 `D:\code\rsx` 编出来的 `Release_NoGui\rsx.exe`。旧发布目录的 `rsx_nogui.exe` 读不了 v21 模型，也不会按两档分文件。按两档导出是 2026-11-05 改的 `ExportPhysicsModelBVH`（`src/game/rtech/assets/model.cpp`），提交为 `c43c095`，已推到 fork `ccdescipline/rsx` 的 main。之前的版本会把所有 part 合进一个 STL。换机器或重新编译 rsx 时，要从这个提交之后的 main 编。
 - **白名单**：导模型要 `--loadwhitelist mdl_,asqd,Ptch`。少了 `asqd` 会崩在 `ParseSequence`。
 - **`--exportfilter`**：逗号分隔、不分大小写的子串匹配。rsx 里的资源名用反斜杠（`mdl\ola\sewer_grate_01.rmdl`），`sprp` 里是正斜杠，按完整路径过滤前要先换斜杠。
-- **客户端 lump 只过滤 `bsp_lump`**：过滤 `.bsp` 会顺带导出 `.bsp` 本体（渲染顶点 OBJ，不是碰撞），这一步在 habitat 上让 rsx 崩过（`wrap.cpp` 里的 `CBSPData::Export`）。两个客户端包要放在同一次调用里。
+- **客户端 lump 只过滤 `bsp_lump`**：过滤 `.bsp` 会顺带导出 `.bsp` 本体（渲染顶点 OBJ，不是碰撞），这一步在 habitat 上让 rsx 崩过（`wrap.cpp` 里的 `CBSPData::Export`）。2026-11-12 起缺 lump 或 lump 解不出来时 rsx 只跳过这个 `.bsp`（日志 `BSP: not exporting ...`），不再崩，但仍然没必要导它。两个客户端包要放在同一次调用里。
 - **`_env.ent` 末尾的 `\0`**：新 rsx 会把字符串结尾的 `\0` 也写进去，旧版不会。脚本会去掉，和 navdemo 已经在用的文件保持一致。
 - **新 rsx 多写的 lump**：客户端会多写出 30 多个 lump（训练场 64 个，旧版 29 个）。碰撞相关的 `000E/0010/0012/0013/0023` 和旧版逐字节相同。
 

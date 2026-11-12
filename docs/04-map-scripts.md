@@ -63,7 +63,7 @@ python tools/export_map_scripts.py --skip mp_lobby_server_temp
 python tools/export_map_scripts.py --from-existing
 ```
 
-`--scripts-only` 加 `--exportfilter scripts\vscripts`，只导脚本。`--no-bsp` 用 `--exportfilter scripts\vscripts,0x`，导脚本 + rson、跳过 BSP lump：当前 RSX 对单独的地图 pak 会尝试导出 BSP，缺 lump 时直接 exit 1，所以 2026-11 更新后地图脚本用这个模式。
+`--scripts-only` 加 `--exportfilter scripts\vscripts`，只导脚本。`--no-bsp` 用 `--exportfilter scripts\vscripts,0x`，导脚本 + rson、跳过 BSP lump：旧 RSX 对单独的地图 pak 会尝试导出 BSP，缺 lump 时直接 exit 1，所以 2026-11 更新后地图脚本用这个模式。2026-11-12 起 RSX 缺 lump 时只跳过那个 `.bsp`（日志 `BSP: not exporting ...`），不再退出，但 `--no-bsp` 仍然推荐（BSP 本体是渲染顶点 OBJ，没用）。
 
 `--skip <pak>` 按 pak 名精确跳过；`--only` 会把同名的 `_client_perm` / `_server_temp` 一起带进来，需要排除时用 `--skip`。默认和上一轮一样导全部 `wrap,rson`（当前 RSX 会因 BSP 失败，建议加 `--no-bsp`）。
 

@@ -104,7 +104,7 @@ struct SettingsAssetHeader_v2_t
 
 	char* stringData;
 
-	char unk_1C[8];
+	void** assetRefs; // engine SettingsHeader::assetRefs
 
 	uint32_t uniqueID;
 	char unk_24[4];
@@ -161,7 +161,7 @@ public:
 	SettingsMod_s* modValues;
 
 	uint32_t valueBufSize;
-	uint32_t modFlags;
+	uint32_t modFlags; // engine SPModOpCount: number of mod ops that belong to mod 0, which must be named "SP" (exported as "$modFlags")
 	uint32_t modNameCount;
 	uint32_t modValuesCount;
 

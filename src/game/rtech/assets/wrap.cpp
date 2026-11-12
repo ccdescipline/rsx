@@ -5,6 +5,7 @@
 #include <game/bsp/bsp.h>
 #include <thirdparty/imgui/imgui.h>
 #include <thirdparty/imgui/misc/imgui_memory_editor.h>
+#include <thirdparty/oodle/oodle2.h>
 
 WrapAsset::~WrapAsset()
 {
@@ -52,69 +53,75 @@ void LoadWrapAsset(CAssetContainer* const pak, CAsset* const asset)
 }
 
 
-static bool GetStreamedDataForWrapAsset(CPakAsset* const asset, const uint32_t size, const int32_t skipSize, std::unique_ptr<char[]>& wrapData)
+static std::unique_ptr<char[]> GetStreamedDataForWrapAsset(CPakAsset* const asset, const uint32_t size)
 {
+    // engine: FS_ReadAsyncFile(streamHandle, streamOffset, size) - no header to skip
     AssetPtr_t streamEntry = asset->getStarPakStreamEntry(false);
     if (!IS_ASSET_PTR_INVALID(streamEntry))
-    {
-        wrapData = asset->getStarPakData(streamEntry.offset + skipSize, size, false);
-        return true;
-    }
+        return asset->getStarPakData(streamEntry.offset, size, false);
 
     streamEntry = asset->getStarPakStreamEntry(true);
     if (!IS_ASSET_PTR_INVALID(streamEntry))
-    {
-        wrapData = asset->getStarPakData(streamEntry.offset + skipSize, size, true);
-        return true;
-    }
+        return asset->getStarPakData(streamEntry.offset, size, true);
 
-    assertm(false, "GetStreamedDataForWrapAsset called but no streamed data?");
-    return false;
+    return nullptr;
 }
 
+// Mirrors WrappedFile_Load / WrappedFileSystem_Read: read cmpSize (compressed) or dcmpSize (raw)
+// bytes from the pak page or the starpak, then OodleLZ_Decompress when the compressed flag is set.
+// Returns nullptr instead of a partially filled buffer when anything fails.
 std::unique_ptr<char[]> GetWrapAssetData(CAsset* const asset, uint64_t* outSize)
 {
     CPakAsset* pakAsset = static_cast<CPakAsset*>(asset);
 
     const WrapAsset* const wrapAsset = reinterpret_cast<WrapAsset*>(pakAsset->extraData());
 
-    const uint32_t wrapSize = wrapAsset->isCompressed ? wrapAsset->cmpSize : wrapAsset->dcmpSize;
-    std::unique_ptr<char[]> wrapData = std::make_unique<char[]>(wrapSize);
+    if (outSize)
+        *outSize = 0;
+
+    const uint32_t srcSize = wrapAsset->isCompressed ? wrapAsset->cmpSize : wrapAsset->dcmpSize;
+    std::unique_ptr<char[]> srcData;
 
     if (wrapAsset->isStreamed)
     {
-        if (!GetStreamedDataForWrapAsset(pakAsset, wrapSize, wrapAsset->skipSize, wrapData))
-        {
-            assertm(false, "Failed to get streamed data for wrap asset.");
-            return nullptr;
-        }
+        srcData = GetStreamedDataForWrapAsset(pakAsset, srcSize);
     }
-    else
+    else if (wrapAsset->data)
     {
-        constexpr uint16_t staticAsset = WRAP_FLAG_FILE_IS_COMPRESSED | WRAP_FLAG_FILE_IS_PERMANENT;
-        const char* buf = (const char*)wrapAsset->data;
-
-        // [amos]: if this condition is met, some internal header needs to be skipped.
-        // only appears to happen on small files that appear to be marked for compress
-        // but failed during build, e.g. mp_rr_arena_phase_runner.bsp.0005.bsp_lump in
-        // release "build R5pc_r5-180_J25_CL4941853_2023_07_27_16_31". permanent assets
-        // only
-        if (!wrapAsset->isCompressed && (wrapAsset->flags & staticAsset) == staticAsset)
-            buf += 2;
-
-        memcpy_s(wrapData.get(), wrapSize, buf, wrapSize);
+        srcData = std::make_unique<char[]>(srcSize);
+        memcpy_s(srcData.get(), srcSize, wrapAsset->data, srcSize);
     }
 
-    uint64_t wrapOutSize = wrapAsset->dcmpSize;
-    if (wrapAsset->isCompressed)
+    if (!srcData)
     {
-        wrapData = RTech::DecompressStreamedBuffer(std::move(wrapData), wrapOutSize, eCompressionType::OODLE);
+        Log("WRAP: no data for %s (flags 0x%X, cmp %u, dcmp %u, streamed %d)\n", asset->GetAssetName().c_str(),
+            wrapAsset->flags, wrapAsset->cmpSize, wrapAsset->dcmpSize, wrapAsset->isStreamed);
+        return nullptr;
+    }
+
+    if (!wrapAsset->isCompressed)
+    {
+        if (outSize)
+            *outSize = wrapAsset->dcmpSize;
+
+        return srcData;
+    }
+
+    std::unique_ptr<char[]> outData = std::make_unique<char[]>(wrapAsset->dcmpSize);
+    const OO_SINTa decoded = OodleLZ_Decompress(srcData.get(), wrapAsset->cmpSize, outData.get(), wrapAsset->dcmpSize,
+        OodleLZ_FuzzSafe_Yes, OodleLZ_CheckCRC_No, OodleLZ_Verbosity_None);
+
+    if (decoded != static_cast<OO_SINTa>(wrapAsset->dcmpSize))
+    {
+        Log("WRAP: Oodle decode failed for %s (flags 0x%X, cmp %u, dcmp %u, got %lld)\n", asset->GetAssetName().c_str(),
+            wrapAsset->flags, wrapAsset->cmpSize, wrapAsset->dcmpSize, static_cast<long long>(decoded));
+        return nullptr;
     }
 
     if (outSize)
-        *outSize = wrapOutSize;
+        *outSize = wrapAsset->dcmpSize;
 
-    return wrapData;
+    return outData;
 }
 
 // eugh
@@ -177,6 +184,9 @@ void PostLoadWrapAsset(CAssetContainer* const pak, CAsset* const asset)
     {
 #if (HAS_BSP_SUPPORT)
         std::unique_ptr<char[]> wrapData = GetWrapAssetData(asset, nullptr);
+
+        if (!wrapData)
+            break;
 
         CBSPData* bspData = new CBSPData(assetPath.stem().string());
         bspData->PopulateFromPakAsset(pakAsset, wrapData.get());
@@ -248,6 +258,12 @@ bool ExportWrapAsset(CAsset* const asset, const int setting)
 #if (HAS_BSP_SUPPORT)
     case VPKFileType_e::BSP:
     {
+        CBSPData* bspData = reinterpret_cast<CBSPData*>(wrapAsset->parsedData);
+
+        // missing lumps (e.g. _client_temp not loaded) or a failed decode: skip this file only
+        if (!bspData)
+            return false;
+
         StreamIO wrapOut;
 
         if (!wrapOut.open(exportPath.string(), eStreamIOMode::Write))
@@ -256,11 +272,15 @@ bool ExportWrapAsset(CAsset* const asset, const int setting)
             return false;
         }
 
-        CBSPData* bspData = reinterpret_cast<CBSPData*>(wrapAsset->parsedData);
-
-        bspData->Export(wrapOut.W());
+        const bool exported = bspData->Export(wrapOut.W());
 
         wrapOut.close();
+
+        if (!exported)
+        {
+            std::filesystem::remove(exportPath);
+            return false;
+        }
 
         break;
     }

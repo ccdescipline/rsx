@@ -1,19 +1,13 @@
 #pragma once
 
+// Per axis the node stores the four children's mins first, then their four maxs
+// (engine CollBvh4Node_s minMax[axis][2][4]); decode = origin + float(q << 16) * decodeScale.
 struct dbvhaxis_t
 {
-	short minChild0;
-	short maxChild0;
-
-	short minChild1;
-	short maxChild1;
-
-	short minChild2;
-	short maxChild2;
-
-	short minChild3;
-	short maxChild3;
+	short minChild[4];
+	short maxChild[4];
 };
+static_assert(sizeof(dbvhaxis_t) == 16);
 
 enum dbvhchildtype_e
 {
@@ -22,11 +16,12 @@ enum dbvhchildtype_e
 	INVALID = 2,
 	UNK_3,
 	PRIM_TRI,         // triangle primitive using float3 verts
-	PRIM_TRI_PACKED,  // triangle primitive using uint16 verts
+	PRIM_TRI_PACKED,  // triangle primitive using int16 verts (CollPackedPos_s), see dmodel bvhFlags bit 0
 	PRIM_QUAD,        // quad primitive using float3 verts
-	PRIM_QUAD_PACKED, // quad primitive using uint16 verts
-	UNK_8,
-	STATIC_PROP,
+	PRIM_QUAD_PACKED, // quad primitive using int16 verts (CollPackedPos_s)
+	UNK_8,            // convex hull: own origin/decodeScale + packed verts, then tri/quad lists
+	STATIC_PROP,      // dword: prop index in bits 0-23, bit 31 forces collision detail 1
+	HEIGHTFIELD,      // CollLeafHeightfieldPatch_s, worldspawn only, data in lumps 0x15/0x16
 };
 
 struct dbvhleaf_poly_t

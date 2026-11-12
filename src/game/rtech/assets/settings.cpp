@@ -71,6 +71,18 @@ SettingsKVValue_t::~SettingsKVValue_t()
 	}
 }
 
+// Shortest text that reads back as the same float (instead of {:f}, which keeps only 6 decimals
+// and turns small values like 1e-7 into 0.000000). Always keeps a '.' or exponent.
+static std::string Settings_FormatFloat(const float value)
+{
+	std::string out = std::format("{}", value);
+
+	if (out.find_first_of(".eEn") == std::string::npos) // 'n' covers inf/nan
+		out += ".0";
+
+	return out;
+}
+
 struct DynamicArrayData_t
 {
 	int arraySize;
@@ -251,11 +263,9 @@ void SettingsAsset::R_WriteSetFileArray(std::string& out, const size_t indentLev
 
 		out += indentation + "\t}";
 
-		if (fieldCount)
-		{
-			const char* const commaChar = i != (arrayElemCount - 1) ? ",\n" : "\n";
-			out += commaChar;
-		}
+		// separate elements even when the sub layout has no fields, otherwise "{}{}" is invalid JSON
+		const char* const commaChar = i != (arrayElemCount - 1) ? ",\n" : "\n";
+		out += commaChar;
 	}
 
 	out += indentation + "]";
@@ -278,20 +288,20 @@ void SettingsAsset::R_WriteSetFile(std::string& out, const size_t indentLevel, c
 	}
 	case eSettingsFieldType::ST_FLOAT:
 	{
-		out.append(std::format("{:f}", *reinterpret_cast<const float*>(&valData[field->valueOffset])));
+		out.append(Settings_FormatFloat(*reinterpret_cast<const float*>(&valData[field->valueOffset])));
 		break;
 	}
 	case eSettingsFieldType::ST_FLOAT2:
 	{
 		const float* floatValues = reinterpret_cast<const float*>(&valData[field->valueOffset]);
-		out.append(std::format("\"<{:f},{:f}>\"", floatValues[0], floatValues[1]));
+		out.append(std::format("\"<{:s},{:s}>\"", Settings_FormatFloat(floatValues[0]), Settings_FormatFloat(floatValues[1])));
 
 		break;
 	}
 	case eSettingsFieldType::ST_FLOAT3:
 	{
 		const float* floatValues = reinterpret_cast<const float*>(&valData[field->valueOffset]);
-		out.append(std::format("\"<{:f},{:f},{:f}>\"", floatValues[0], floatValues[1], floatValues[2]));
+		out.append(std::format("\"<{:s},{:s},{:s}>\"", Settings_FormatFloat(floatValues[0]), Settings_FormatFloat(floatValues[1]), Settings_FormatFloat(floatValues[2])));
 
 		break;
 	}
@@ -348,7 +358,7 @@ void SettingsAsset::R_WriteModNames(std::string& out) const
 	for (uint32_t i = 0; i < modNameCount; i++)
 	{
 		const char* const commaChar = i != (modNameCount - 1) ? "," : "";
-		out += std::string("\t\t\"") + modNames[i] + "\"" + commaChar + "\n";
+		out += std::string("\t\t\"") + EscapeString(modNames[i]) + "\"" + commaChar + "\n";
 	}
 
 	out += "\t]";
@@ -379,7 +389,7 @@ void SettingsAsset::R_WriteModValues(std::string& out, const SettingsLayoutAsset
 				break;
 			case SettingsModType_e::kFloatAdd:
 			case SettingsModType_e::kFloatMultiply:
-				out += std::format("\"value\": {:f},\n", modValue->value.floatValue);
+				out += std::format("\"value\": {:s},\n", Settings_FormatFloat(modValue->value.floatValue));
 				break;
 			case SettingsModType_e::kBool:
 				out += std::format("\"value\": {:s},\n", modValue->value.boolValue ? "true" : "false");
@@ -388,10 +398,10 @@ void SettingsAsset::R_WriteModValues(std::string& out, const SettingsLayoutAsset
 				if (searchResult.field->dataType == eSettingsFieldType::ST_INTEGER)
 					out += std::format("\"value\": {:d},\n", modValue->value.intValue);
 				else
-					out += std::format("\"value\": {:f},\n", modValue->value.floatValue);
+					out += std::format("\"value\": {:s},\n", Settings_FormatFloat(modValue->value.floatValue));
 				break;
 			case SettingsModType_e::kString:
-				out += std::format("\"value\": \"{:s}\",\n", &stringData[modValue->value.stringOffset]);
+				out += std::format("\"value\": \"{:s}\",\n", EscapeString(&stringData[modValue->value.stringOffset]));
 				break;
 			}
 

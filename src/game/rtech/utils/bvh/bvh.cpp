@@ -39,26 +39,11 @@ static void Coll_ParseTriPackedLeaf5(CollisionModel_t& colModel, const dbvhleaf_
 		const dbvhtri_t& tri = triData[i];
 
 		baseVert += tri.vertAIndex;
-		PackedVector p1 = pVertices[baseVert];
-		PackedVector p2 = pVertices[baseVert + 1 + tri.vertBIndex];
-		PackedVector p3 = pVertices[baseVert + 1 + tri.vertCIndex];
 
 		Triangle t{
-			Vector(
-				p1.x * 0xFFFF * scale + origin.x,
-				p1.y * 0xFFFF * scale + origin.y,
-				p1.z * 0xFFFF * scale + origin.z
-			),
-			Vector(
-				p2.x * 0xFFFF * scale + origin.x,
-				p2.y * 0xFFFF * scale + origin.y,
-				p2.z * 0xFFFF * scale + origin.z
-			),
-			Vector(
-				p3.x * 0xFFFF * scale + origin.x,
-				p3.y * 0xFFFF * scale + origin.y,
-				p3.z * 0xFFFF * scale + origin.z
-			),
+			pVertices[baseVert].Decode(origin, scale),
+			pVertices[baseVert + 1 + tri.vertBIndex].Decode(origin, scale),
+			pVertices[baseVert + 1 + tri.vertCIndex].Decode(origin, scale),
 		};
 
 		t.flags = contents;
@@ -108,27 +93,12 @@ static void Coll_ParseQuadPackedLeaf7(CollisionModel_t& colModel, const dbvhleaf
 		const dbvhquad_t& quad = quadData[i];
 
 		baseVert += quad.vertAIndex;
-		PackedVector p1 = pVertices[baseVert];
-		PackedVector p2 = pVertices[baseVert + 1 + quad.vertBIndex];
-		PackedVector p3 = pVertices[baseVert + 1 + quad.vertCIndex];
 
 		Quad q{};
 
-		q.a = Vector(
-			p1.x * 0xFFFF * scale + origin.x,
-			p1.y * 0xFFFF * scale + origin.y,
-			p1.z * 0xFFFF * scale + origin.z
-		);
-		q.b = Vector(
-			p2.x * 0xFFFF * scale + origin.x,
-			p2.y * 0xFFFF * scale + origin.y,
-			p2.z * 0xFFFF * scale + origin.z
-		);
-		q.c = Vector(
-			p3.x * 0xFFFF * scale + origin.x,
-			p3.y * 0xFFFF * scale + origin.y,
-			p3.z * 0xFFFF * scale + origin.z
-		);
+		q.a = pVertices[baseVert].Decode(origin, scale);
+		q.b = pVertices[baseVert + 1 + quad.vertBIndex].Decode(origin, scale);
+		q.c = pVertices[baseVert + 1 + quad.vertCIndex].Decode(origin, scale);
 
 		q.d = Vector(
 			q.a.x + (q.b.x - q.a.x) + (q.c.x - q.a.x),
@@ -189,6 +159,7 @@ void Coll_HandleNodeChildType(CollisionModel_t& colModel, const uint32_t content
 	switch (nodeType)
 	{
 	case dbvhchildtype_e::NO_CHILD: // 1
+	case dbvhchildtype_e::INVALID:  // 2, the engine skips it as well
 		break;
 	case dbvhchildtype_e::NODE: // 0
 	{

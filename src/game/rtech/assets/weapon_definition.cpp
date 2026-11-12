@@ -15,27 +15,59 @@ void LoadWeaponDefinitionAsset(CAssetContainer* const pak, CAsset* const asset)
     pakAsset->SetAssetName(assetName);
 }
 
+// Escape only what would break the "key" "value" line. Backslashes are left alone: values such as
+// sourceFilename ("game\r2\scripts\weapons\...") are stored with literal backslashes.
+static std::string Wepn_EscapeString(const char* const str)
+{
+    std::string out;
+
+    for (const char* c = str; *c; ++c)
+    {
+        switch (*c)
+        {
+        case '"':  out += "\\\""; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        default:   out += *c; break;
+        }
+    }
+
+    return out;
+}
+
+// Shortest text that round-trips to the same float, always keeping a '.' or exponent so the
+// value is not mistaken for an integer when the file is read back.
+static std::string Wepn_FormatFloat(const float value)
+{
+    std::string out = std::format("{}", value);
+
+    if (out.find_first_of(".eEn") == std::string::npos) // 'n' covers inf/nan
+        out += ".0";
+
+    return out;
+}
+
 std::string R_GetWeaponDefinitionAsString(const WepnData_v1_t* const key, const std::string& indentStr)
 {
-    std::string retVal = indentStr + "\"" + key->name + "\"\n" + indentStr + "{\n";
+    std::string retVal = indentStr + "\"" + Wepn_EscapeString(key->name) + "\"\n" + indentStr + "{\n";
 
-    // first loop over child values
+    // first loop over child values (stored in source order; valueOrder is only the hash lookup)
     for (int j = 0; j < key->numValues; ++j)
     {
-        retVal += indentStr + "\t// val unk: " + std::to_string(key->unk_20[j]) + "\n";
         WepnKeyValue_v1_t* val = &key->childKVPairs[j];
-        retVal += indentStr + "\t\"" + std::string(val->key) + "\" \"";
+        retVal += indentStr + "\t\"" + Wepn_EscapeString(val->key) + "\" \"";
 
         if (val->valueType == WepnValueType_t::STRING)
-            retVal += std::string(val->value.strVal);
+            retVal += Wepn_EscapeString(val->value.strVal);
         else if (val->valueType == WepnValueType_t::INTEGER)
             retVal += std::to_string(val->value.intVal);
         else if (val->valueType == WepnValueType_t::FLT)
-            retVal += std::to_string(val->value.fltVal);
+            retVal += Wepn_FormatFloat(val->value.fltVal);
         else
         {
-            retVal += "\"unk\" // " + std::string(val->key) + ": unknown. rawval: " + std::format("{:X}", val->value.rawVal);
+            retVal += "unk\" // " + std::string(val->key) + ": unknown type " + std::to_string(val->valueType) + ", rawval: " + std::format("{:X}", val->value.rawVal) + "\n";
             Log("WEPN: unknown var type: %s (type %i): %llX\n", val->key, val->valueType, val->value.rawVal);
+            continue;
         }
         retVal += "\"\n";
     }
@@ -47,8 +79,6 @@ std::string R_GetWeaponDefinitionAsString(const WepnData_v1_t* const key, const 
     for (int i = 0; i < key->numChildren; ++i)
     {
         WepnData_v1_t* childKey = &key->childObjects[i];
-
-        retVal += indentStr + "\t// child unk: " + std::to_string(key->unk_28[i]) + "\n";
 
         retVal += R_GetWeaponDefinitionAsString(childKey, indentStr + "\t");
 
@@ -99,7 +129,7 @@ bool ExportWeaponDefinitionAsset(CAsset* const asset, const int setting)
     out.write(wepnTxt.c_str(), wepnTxt.length());
     out.close();
 
-    return false;
+    return true;
 }
 
 void InitWeaponDefinitionAssetType()

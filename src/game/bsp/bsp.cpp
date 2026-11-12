@@ -288,10 +288,14 @@ void CBSPData::CreateOrUpdatePreviewStructuredBuffers()
 #define POPULATE_BSP_ENTS(type) \
 	if(CAsset* entAsset = g_assetData.FindAsset(std::format("maps/{}_{}.ent", m_mapName, #type))) \
 	{ \
-		std::unique_ptr<char[]> entData = GetWrapAssetData(entAsset, nullptr); \
-		std::string str(entData.get()); \
-		BSP_ParseEntities(str, type##EntitiesKV); \
-		hasEntities_##type = true; \
+		uint64_t entSize = 0; \
+		std::unique_ptr<char[]> entData = GetWrapAssetData(entAsset, &entSize); \
+		if (entData) \
+		{ \
+			std::string str(entData.get(), strnlen(entData.get(), entSize)); \
+			BSP_ParseEntities(str, type##EntitiesKV); \
+			hasEntities_##type = true; \
+		} \
 	}
 
 void CBSPData::PopulateFromPakAsset(CPakAsset* pakAsset, void* bspData)
@@ -317,7 +321,14 @@ void CBSPData::PopulateFromPakAsset(CPakAsset* pakAsset, void* bspData)
 				CAsset* lumpAsset = g_assetData.FindAsset(lumpAssetName);
 
 				if (lumpAsset)
-					SetLumpData(i, GetWrapAssetData(lumpAsset, nullptr));
+				{
+					std::unique_ptr<char[]> lumpData = GetWrapAssetData(lumpAsset, nullptr);
+
+					if (lumpData)
+						SetLumpData(i, std::move(lumpData));
+					else
+						Log("BSP: Map %s lump ID %04X (%s) could not be read.\n", m_mapName.c_str(), i, s_LumpNames[(lumptype_e)i]);
+				}
 				else
 					Log("BSP: Map %s expected lump ID %04X (%s) to exist, but no lump could be found. Are we missing a file?\n", m_mapName.c_str(), i, s_LumpNames[(lumptype_e)i]);
 			}
@@ -638,9 +649,17 @@ CDXDrawData* CBSPData::ConstructPreviewData()
 }
 
 // very temp
-void CBSPData::Export(std::ofstream* out)
+bool CBSPData::Export(std::ofstream* out)
 {
-	UNUSED(out);
+	for (const int lumpId : { LUMP_VERTEXES, LUMP_VERTNORMALS, LUMP_MESH_INDICES, LUMP_MODELS, LUMP_MESHES, LUMP_MATERIAL_SORT })
+	{
+		if (!HasLumpData(lumpId))
+		{
+			Log("BSP: not exporting %s, lump %04X (%s) is missing\n", m_mapName.c_str(), lumpId, s_LumpNames[(lumptype_e)lumpId]);
+			return false;
+		}
+	}
+
 	const float3* positionsLump = reinterpret_cast<float3*>(GetLumpData(LUMP_VERTEXES).get());
 	const float3* normalsLump = reinterpret_cast<float3*>(GetLumpData(LUMP_VERTNORMALS).get());
 	const uint16_t* indicesLump = reinterpret_cast<uint16_t*>(GetLumpData(LUMP_MESH_INDICES).get());
@@ -684,6 +703,12 @@ void CBSPData::Export(std::ofstream* out)
 
 			const UINT vertexStride = GetVertexStrideByLumpId(meshVertLumpId);
 
+			if (!HasLumpData(meshVertLumpId))
+			{
+				Log("BSP: %s mesh %d uses missing vertex lump %04X, skipped\n", m_mapName.c_str(), j, meshVertLumpId);
+				continue;
+			}
+
 			std::string faceString = "";
 			int vertWriteIndex = 0;
 			for (int k = mesh->firstIdx; k < mesh->firstIdx + (mesh->triCount * 3); ++k)
@@ -708,4 +733,6 @@ void CBSPData::Export(std::ofstream* out)
 			*out << (faceString);
 		}
 	}
+
+	return true;
 }

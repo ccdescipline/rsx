@@ -24,8 +24,15 @@ static bool ExportAnimRecordingAsset(CAsset* const asset, const int setting)
 
     CPakAsset* pakAsset = static_cast<CPakAsset*>(asset);
 
+    // Only v1 (816-byte header) is mapped. Current paks (v3.0.1.30) register anir v2 with an
+    // 880-byte header; the client binary only copies it in the link callback and never reads the
+    // fields, so the v2 layout has to come from the dedicated server binary before it can be added.
     if (pakAsset->version() != 1)
-        return false; // 1 is currently the only supported version.
+    {
+        Log("ANIR: %s is version %d (header %u bytes), only version 1 can be exported\n",
+            pakAsset->GetAssetName().c_str(), pakAsset->version(), pakAsset->data()->headerStructSize);
+        return false;
+    }
 
     // Create exported path + asset path.
     std::filesystem::path exportPath = g_rsxSettings.GetExportDirectory();

@@ -45,8 +45,16 @@ struct dmodel_t
 	Vector maxs;
 	int firstMesh;
 	int meshCount;
-	int unk[8];
+
+	// collision (engine CollisionBSPData_ConvertArray<dmodel_t, CollBvh4_s>)
+	uint32_t bvhNode;    // first node in LUMP_BVH_NODES, child node indices are relative to it
+	uint32_t bvhLeaf;    // first dword in LUMP_BVH_LEAF_DATA, leaf indices are relative to it
+	uint32_t vertIndex;  // first vertex in LUMP_VERTEXES, or in LUMP_PACKED_VERTICES when (bvhFlags & 1)
+	uint32_t bvhFlags;   // bit 0: this model's verts are packed (int16) instead of float3
+	Vector origin;       // decode origin for node bounds and packed verts
+	float decodeScale;   // world = origin + float(q << 16) * decodeScale
 };
+static_assert(sizeof(dmodel_t) == 64);
 
 struct dmaterialsort_t
 {
@@ -113,7 +121,15 @@ public:
 
 	CDXDrawData* ConstructPreviewData();
 
-	void Export(std::ofstream* out);
+	// Writes the render geometry as OBJ. Returns false (and writes nothing) when a lump it needs
+	// is missing or failed to decode, e.g. when only one of the _client_perm/_client_temp paks is loaded.
+	bool Export(std::ofstream* out);
+
+	bool HasLumpData(int lumpId) const
+	{
+		const auto it = m_lumpData.find(static_cast<uint8_t>(lumpId));
+		return it != m_lumpData.end() && it->second != nullptr;
+	}
 
 	const std::shared_ptr<char[]> GetLumpData(int lumpId) const
 	{

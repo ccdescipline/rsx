@@ -22,6 +22,10 @@
 | [06 换图导出碰撞数据](06-map-collision-export.md) | `tools/export_map_collision.py --map <图>` | `collision_maps/<图>/` |
 | [07 武器脚本](07-weapon-scripts.md) | `tools/export_weapon_scripts.py` | `weapon_scripts/scripts/weapons/` |
 
+辅助脚本：`tools/bvh_decode.py`（按引擎解碰撞 BVH：packed 顶点、凸包、地形 heightfield，`crop_map_collision.py` / `place_prop_collision.py` 用它）、`tools/compare_weapon_scripts.py`（按值比较两次武器导出，区分格式变化和真实改动）、`tools/compare_exports.py`（按文件哈希比较两次导出）。
+
+`--rsx` 默认是本仓库的 `bin\Release_NoGui\rsx.exe`，`--paks` 默认 `D:\Apex\paks\Win64`，可用环境变量 `APEX_PAKS` 改。
+
 一次性重跑（按顺序，2 依赖 1 的 common 解包缓存不是必须）：
 
 ```bat

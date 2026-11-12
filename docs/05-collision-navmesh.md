@@ -35,6 +35,26 @@ exported_props_physics/<map>/                 # rsx 的完整导出（地图包�
 
 叶子里是三角/四边形（含 packed 顶点）和静态道具引用。顶点在 `0003`（`LUMP_VERTEXES`），内容掩码 `0010`，表面属性 `0011`。服务端 lump 没有 BVH。
 
+### 引擎加载的全部碰撞 lump（`CollisionBSPData_Load`，r2 PDB；1.30 一致）
+
+| lump | 内容 |
+|---|---|
+| `0003` | float3 顶点 |
+| `0014` | packed 顶点，3 × **有符号** int16 |
+| `0010` | 内容掩码（u32） |
+| `0011` / `000F` | 表面属性（8 字节）/ 表面名字符串 |
+| `0012` / `0013` | BVH 节点（64 字节）/ 叶子数据（u32） |
+| `0015` | heightfield（地形），每个 40 字节：origin(3f) scale(3f) dims(2×u16) heightCount(u32) 指针(8，运行时) |
+| `0016` | heightfield 高度采样（u8），各 heightfield 按顺序各取 heightCount 个 |
+| `000E` | dmodel：`+32` bvhNode、`+36` bvhLeaf、`+40` vertIndex、`+44` bvhFlags、`+48` origin、`+60` decodeScale |
+
+- dmodel 的 `bvhFlags` 第 0 位为 1 时，这个模型的顶点是 `0014`（packed），否则是 `0003`（float3），都从 `vertIndex` 开始。`map_info.txt` 里写了 worldspawn 的这两个值。
+- packed 顶点和节点包围盒同一个还原公式：`origin + float(q << 16) × decodeScale`，q 是**有符号** int16（等于 `q × 65536 × decodeScale`）。
+- 子节点类型：0 节点、1 空、2 跳过、3 bundle、4/6 float 三角/四边形、5/7 packed 三角/四边形、8 凸包（自带 origin/decodeScale 和 packed 顶点，头 20 字节）、9 静态道具、**10 heightfield patch**（只出现在 worldspawn，数据在 `0015`/`0016`）。
+- 四边形：`p0 = v`、`p1 = v+1+b`、`p3 = v+1+c`、`p2 = p1 − p0 + p3`，拆成 `(p0,p1,p2)` 和 `(p0,p2,p3)`。
+- heightfield patch（40 字节）：u16 coord[2]、u8 dims[2]、u8（第 0 位 triangulateTopToBottom，1–7 位 heightfield 下标）、u8 quadsPerPlane、float maxVerticalError、u32 heightDataOffset、float heightBias、float heightScale、u64 表面属性 RLE 位、u16 表面属性[4]。高度采样 0 是空洞，其余 `z = (s − 1) × heightScale + heightBias`。完整的三角化（含空洞判定）在 `tools/bvh_decode.py` 的 `_heightfield`，照搬引擎 `CollHeightfield_PatchIter`。
+- 地形碰撞**不在**道具 STL 里。`export_map_collision.py` 现在会多写一个 `props_world/<bsp>_terrain_collision.stl`（世界坐标，空洞已去掉）；navdemo 也可以直接读 `0015`/`0016` 自己解。
+
 `.nm` 是 Detour 集合：文件头魔数 `TESM`，训练场这两份是版本 9、tile 512。体型名来自 r5sdk 的 `NavMeshType_e`：
 
 | 文件名 | 体型 | 训练场 |
@@ -109,7 +129,16 @@ rmdl 里的碰撞是 BVH4（节点、叶子格式和地图 BSP 的一样），�
 
 训练场包里 415 个有碰撞的模型：295 个是 2 个 part、`(1, 0)`，即 detail 0 = part 1（粗外壳，常常就是一个盒子，例如 `box_small_01` 12 个三角），detail 1 = part 0（细网格，1036 个三角）。119 个是 1 个 part、`(-1, 0)`，只有 detail 1，多是弹壳、垃圾袋、灯、通风口、贴花这类小东西。1 个动画模型 24 个 part、`(-1, -1)`。两个 part 的 contents 都是 `CONTENTS_SOLID` 一类（`0x1`，部分带 `0x2`/`0x8`），不是按掩码区分用途。
 
-地图 BVH 的道具叶子 dword 第 31 位为 1（`solid=7`）时，这个实例只用 detail 1。玩家移动的规则是：第 31 位为 1 用 detail 1，其余用 detail 0。navdemo 那边按引擎代码确认过。节点包围盒和这条规则一致，但只靠节点框推不出来：
+地图 BVH 的道具叶子 dword 第 31 位为 1（`solid=7`）时，这个实例只用 detail 1。
+
+引擎怎么选档（v3.0.1.30 `StaticProp_TraceDetailLevel`，r2 PDB 同名函数）：
+
+1. 第 31 位为 1，或 convar `perTriangleCollisionForced`（默认 0）打开 → detail 1
+2. 查询带 LOW 标志（`queryFlags & 1`），或 `perTriangleCollision`（默认 1）关掉 → detail 0
+3. 查询带 HIGH 标志（`& 2`）→ detail 1
+4. 查询带 HIGH_AT_START（`& 4`）→ 查询起点在道具包围盒里时用 detail 1，否则 detail 0
+
+navdemo 那边按引擎代码确认过玩家移动是「第 31 位为 1 用 detail 1，其余用 detail 0」，也就是上面的第 1、2 条（移动具体带哪个查询标志这边没追到）。带 HIGH / HIGH_AT_START 的查询会用到 detail 1，那种情况这份规则不适用。节点包围盒和这条规则一致，但只靠节点框推不出来：
 
 | 实例 | 数量（有节点框的） | 节点框和谁吻合（误差 ≤ 4） |
 |---|---|---|
@@ -121,6 +150,8 @@ solid 6 的节点框把两档都包进去了，所以用 `bounds_err` 验收时�
 训练场被 BVH 引用的 365 个模型里有 75 个没有 detail 0。其中 61 个被 655 个普通实例引用，这些实例对玩家移动没有碰撞。另外 14 个只被第 31 位的实例引用，用的是 detail 1。
 
 2026-11-05 之前的 rsx 会把所有 part 合进一个 STL，结果是两档的并集。solid 7 的石头因此比游戏里宽 10–40 单位，`bounds_err` 最大 403。
+
+2026-11-12 之前的 rsx 把 packed 顶点（叶子类型 5/7/8）当成**无符号** uint16 × 0xFFFF 解，引擎是有符号 int16 × 65536（`src/game/rtech/utils/bvh/bvh.cpp`）。坐标为负的 packed 顶点会被放到很远的地方，正坐标也差 1/65536。用到 packed 顶点的模型 STL 要用修好后的 rsx 重新导；之前 thunderdome / skulltown 那些 `bounds_err` 几十的异常模型先看是不是这个原因。
 
 ### 1. 导模型碰撞网格
 
@@ -179,7 +210,7 @@ python -I tools\place_prop_collision.py --lumps collision_example\client\wrap\ma
 数据格式（训练场 sprp v54 上核对过）：
 
 - `0023` 第一个 game lump 是 `sprp`：`int dictCount`、`char[128] × dictCount`、`int propCount`、两个不用的 int、`64 字节 × propCount`。实例：origin `+0`、angles（pitch/yaw/roll，度）`+12`、scale `+24`、模型下标 u16 `+28`、solid `+30`、flags `+31`。
-- 类型 9 叶子是一个 dword：低 31 位是 `sprp` 下标，第 31 位为 1 表示用 detail 1（训练场上就是 `solid=7` 的道具）。训练场不到 65536 个实例，第 16–30 位都是 0；`mp_rr_olympus_mu3` 有 466427 个实例，下标用到第 18 位，只取低 16 位会全错。bundle（类型 3）里的子叶子也可能是类型 9。
+- 类型 9 叶子是一个 dword：**低 24 位**是 `sprp` 下标（引擎 `StaticProp_Trace`：`dword & 0xFFFFFF`），第 24–31 位整个字节被引擎拷进 trace 结果，第 31 位为 1 表示用 detail 1（训练场上就是 `solid=7` 的道具）。训练场不到 65536 个实例；`mp_rr_olympus_mu3` 有 466427 个实例，下标用到第 18 位，只取低 16 位会全错。第 24–30 位目前的数据里没见到非 0，`place_prop_collision.py` 遇到会打印出来。bundle（类型 3）里的子叶子也可能是类型 9。
 - 只从 worldspawn 的根节点（dmodel 0 的 `bvhNode`=0、`bvhLeaf`=0）往下遍历。节点 lump 里还有别的 brush 模型的树，它们的子节点下标相对自己的基址，按 worldspawn 读会越界（olympus_mu3 上出现过）。
 - 节点包围盒是 int16，每个轴先存 4 个 min 再存 4 个 max（不是 min/max 交替）。还原：`世界坐标 = worldspawn 原点 + q × decodeScale × 65536`。原点在 `000E` 第 0 个 dmodel 的 `+48`，decodeScale 在 `+60`。训练场原点 `(-5834, 3753, -9664)`、decodeScale 2⁻¹⁵（即 × 2）；`mp_rr_olympus_mu3` 是 2⁻¹⁴（× 4），不能写死 2。
 - 变换：Source `AngleMatrix(pitch, yaw, roll)`，`世界 = origin + R × (scale × v)`。

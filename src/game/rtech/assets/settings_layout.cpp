@@ -33,10 +33,11 @@ bool SettingsFieldFinder_FindFieldByAbsoluteOffset(const SettingsLayoutAsset* co
 {
 	for (const SettingsField& field : layout->layoutFields)
 	{
-		const uint32_t totalValueBufSizeAligned = IALIGN(layout->totalLayoutSize, layout->alignment);
+		// Element stride is the layout's dataSize as is (engine SettingsLayoutLookup::elemSize).
+		const uint32_t elemStride = layout->totalLayoutSize;
 		const uint32_t originalBaseCurrentDepth = result.currentBase;
 
-		if (targetOffset >= originalBaseCurrentDepth + (layout->arrayValueCount * totalValueBufSizeAligned))
+		if (targetOffset >= originalBaseCurrentDepth + (layout->arrayValueCount * elemStride))
 			return false; // Beyond this layout.
 
 		if (targetOffset < (originalBaseCurrentDepth + field.valueOffset))
@@ -48,7 +49,7 @@ bool SettingsFieldFinder_FindFieldByAbsoluteOffset(const SettingsLayoutAsset* co
 		// supports nesting static arrays and dynamic arrays into static arrays.
 		for (int currArrayIdx = 0; currArrayIdx < layout->arrayValueCount; currArrayIdx++)
 		{
-			const uint32_t elementBase = originalBaseCurrentDepth + (currArrayIdx * totalValueBufSizeAligned);
+			const uint32_t elementBase = originalBaseCurrentDepth + (currArrayIdx * elemStride);
 			const uint32_t absoluteFieldOffset = elementBase + field.valueOffset;
 
 			const bool isStaticArray = field.dataType == eSettingsFieldType::ST_ARRAY;
@@ -74,7 +75,8 @@ bool SettingsFieldFinder_FindFieldByAbsoluteOffset(const SettingsLayoutAsset* co
 			if (isStaticArray)
 			{
 				const SettingsLayoutAsset* const subLayout = &layout->subHeaders[field.valueSubLayoutIdx];
-				result.currentBase = IALIGN(absoluteFieldOffset, subLayout->alignment);
+				// static array elements start right at the field offset (engine GetSettingsArrayInfo)
+				result.currentBase = absoluteFieldOffset;
 
 				if (SettingsFieldFinder_FindFieldByAbsoluteOffset(subLayout, targetOffset, result))
 				{
@@ -286,6 +288,24 @@ void* PreviewSettingsLayoutAsset(CAsset* const asset, const bool firstFrameForAs
 	return nullptr;
 }
 
+// CSV field: quotes are doubled so help texts containing '"' keep the row intact.
+static std::string SettingsLayout_CsvEscape(const char* const str)
+{
+	std::string out;
+
+	for (const char* c = str; *c; ++c)
+	{
+		if (*c == '"')
+			out += '"';
+
+		out += *c;
+	}
+
+	return out;
+}
+
+// "offset" is relative to the start of one element of this (sub)layout; elements of an array
+// are "dataSize" bytes apart (see the .json next to the table).
 #define SETTINGS_LAYOUT_TABLE_HEADER "\"fieldName\",\"dataType\",\"layoutIndex\",\"offset\",\"helpText\"\n"
 static bool ExportSettingsLayoutInternal(const SettingsLayoutAsset* const hdr, const char* const path,
 	const size_t relativePathIndex, std::vector<std::string>* const pSubLayouts)
@@ -300,7 +320,7 @@ static bool ExportSettingsLayoutInternal(const SettingsLayoutAsset* const hdr, c
 		const SettingsField& field = hdr->layoutFields[i];
 		const char* const end = i == (hdr->fieldCount - 1) ? "\"" : "\"\n";
 
-		out << "\"" << field.fieldName << "\",\"" << s_settingsFieldTypeNames[(int)field.dataType] << "\",\"" << field.valueSubLayoutIdx <<  "\",\"" << std::format("0x{:X}", field.valueOffset) << "\",\"" << field.helpText << end;
+		out << "\"" << SettingsLayout_CsvEscape(field.fieldName) << "\",\"" << s_settingsFieldTypeNames[(int)field.dataType] << "\",\"" << field.valueSubLayoutIdx <<  "\",\"" << std::format("0x{:X}", field.valueOffset) << "\",\"" << SettingsLayout_CsvEscape(field.helpText) << end;
 
 		if (field.dataType == eSettingsFieldType::ST_ARRAY || field.dataType == eSettingsFieldType::ST_DYN_ARRAY)
 		{
@@ -358,8 +378,12 @@ static bool ExportSettingsLayoutInternal(const SettingsLayoutAsset* const hdr, c
 	if (hdr->arrayValueCount > 1)
 		out << "\t\"elementCount\": " << hdr->arrayValueCount << ",\n";
 
+	// size of one element in bytes (engine SettingsLayoutHeader::dataSize), i.e. the array stride
+	out << "\t\"dataSize\": " << hdr->totalLayoutSize << ",\n";
+
 	const size_t numSublayoutPaths = subLayouts.size();
 
+	// key kept for compatibility; the engine calls this field settingsAssetType (0 = player settings)
 	const char* const end = numSublayoutPaths == 0 ? "\n" : ",\n";
 	out << "\t\"extraDataSizeIndex\": " << hdr->extraDataSizeIndex << end;
 
