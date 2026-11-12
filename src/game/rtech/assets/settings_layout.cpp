@@ -286,7 +286,7 @@ void* PreviewSettingsLayoutAsset(CAsset* const asset, const bool firstFrameForAs
 	return nullptr;
 }
 
-#define SETTINGS_LAYOUT_TABLE_HEADER "\"fieldName\",\"dataType\",\"layoutIndex\",\"helpText\"\n"
+#define SETTINGS_LAYOUT_TABLE_HEADER "\"fieldName\",\"dataType\",\"layoutIndex\",\"offset\",\"helpText\"\n"
 static bool ExportSettingsLayoutInternal(const SettingsLayoutAsset* const hdr, const char* const path,
 	const size_t relativePathIndex, std::vector<std::string>* const pSubLayouts)
 {
@@ -300,7 +300,7 @@ static bool ExportSettingsLayoutInternal(const SettingsLayoutAsset* const hdr, c
 		const SettingsField& field = hdr->layoutFields[i];
 		const char* const end = i == (hdr->fieldCount - 1) ? "\"" : "\"\n";
 
-		out << "\"" << field.fieldName << "\",\"" << s_settingsFieldTypeNames[(int)field.dataType] << "\",\"" << field.valueSubLayoutIdx <<  "\",\"" << field.helpText << end;
+		out << "\"" << field.fieldName << "\",\"" << s_settingsFieldTypeNames[(int)field.dataType] << "\",\"" << field.valueSubLayoutIdx <<  "\",\"" << std::format("0x{:X}", field.valueOffset) << "\",\"" << field.helpText << end;
 
 		if (field.dataType == eSettingsFieldType::ST_ARRAY || field.dataType == eSettingsFieldType::ST_DYN_ARRAY)
 		{

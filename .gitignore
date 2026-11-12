@@ -368,6 +368,7 @@ binka_ue_decode_*.lib
 vcpkg_installed/*
 
 # Apex export outputs (tools/export_*.py)
+/export/
 /exported/
 /exported_*/
 /exported_maps*/
