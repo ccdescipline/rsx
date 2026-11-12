@@ -110,7 +110,8 @@ python -I tools\compare_exports.py weapon_scripts\scripts\weapons weapon_scripts
 | 导出 0 个 / 只有 `_rsx_out` 空目录 | RSX 太旧或 `common(01)` 没套上 | 用 `D:\code\rsx\bin\Release_NoGui\rsx.exe`；确认 `patch_master.rpak` 和 `common(01).rpak` 存在 |
 | `pak not found: ...\common.rpak` | `--paks` 指错 | 默认 `D:\Apex\paks\Win64` |
 | 输出路径不对 | 工具在 `cwd=paks` 下跑 RSX，`--exportdir` 要绝对路径 | 用默认 `--out` 或传绝对路径 |
-| 文本里有 `// val unk` / `// child unk` | RSX 保留结构字段序号注释 | 正常，键值完整，不要删 |
+| 文本里有 `// val unk` / `// child unk` | 2026-11-12 之前的 RSX 输出的 hash 查找下标，不是内容 | 新 RSX 不再输出；和旧导出比对时这些行的差异可以忽略 |
+| 和旧导出比，浮点写法变了（`0.500000` → `0.5`）、负整数从 `1844674407…` 变成 `-1` | 新 RSX 用最短可读回浮点、整数按有符号 64 位 | 预期内，是旧版的错 |
 | 覆盖了旧导出 | 直接跑了默认 `--out` | 先用临时目录 + `compare_exports.py` 比对 |
 
 ## 6. 汇报

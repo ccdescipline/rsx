@@ -20,22 +20,13 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import place_prop_collision as ppc  # noqa: E402
+import bvh_decode as bd  # noqa: E402
 
 LUMP_MODELS = 0x0E
-LUMP_VERTEXES = 0x03
 LUMP_BVH_NODES = 0x12
-LUMP_BVH_LEAF_DATA = 0x13
-LUMP_PACKED_VERTICES = 0x14
 
-NO_CHILD = 1
-BUNDLE = 3
-PRIM_TRI = 4
-PRIM_TRI_PACKED = 5
-PRIM_QUAD = 6
-PRIM_QUAD_PACKED = 7
-TYPE8 = 8
-STATIC_PROP = 9
-PRIM_TYPES = (PRIM_TRI, PRIM_TRI_PACKED, PRIM_QUAD, PRIM_QUAD_PACKED, TYPE8)
+NO_CHILD = bd.NO_CHILD
+STATIC_PROP = bd.STATIC_PROP
 
 
 def lump_path(lumps, bsp, i):
@@ -84,131 +75,21 @@ def clear_child_type(nodes, off, child):
     struct.pack_into("<I", nodes, wo, w)
 
 
-def _tri(verts, base, vb, vc, on_poly):
-    o, ob, oc = base * 3, (base + 1 + vb) * 3, (base + 1 + vc) * 3
-    if o + 2 >= len(verts) or ob + 2 >= len(verts) or oc + 2 >= len(verts):
-        return False
-    on_poly(((verts[o], verts[o + 1], verts[o + 2]),
-             (verts[ob], verts[ob + 1], verts[ob + 2]),
-             (verts[oc], verts[oc + 1], verts[oc + 2])))
-    return True
-
-
-def _quad(verts, base, vb, vc, on_poly):
-    o, ob, oc = base * 3, (base + 1 + vb) * 3, (base + 1 + vc) * 3
-    if o + 2 >= len(verts) or ob + 2 >= len(verts) or oc + 2 >= len(verts):
-        return False
-    p1 = (verts[o], verts[o + 1], verts[o + 2])
-    p2 = (verts[ob], verts[ob + 1], verts[ob + 2])
-    p3 = (verts[oc], verts[oc + 1], verts[oc + 2])
-    p4 = tuple(p1[j] + (p2[j] - p1[j]) + (p3[j] - p1[j]) for j in range(3))
-    on_poly((p1, p2, p3))
-    on_poly((p1, p3, p4))
-    return True
-
-
-def _ptri(packed, base, vb, vc, scale, origin, on_poly):
-    if base + 1 + max(vb, vc) >= len(packed):
-        return False
-
-    def w(p):
-        return (p[0] * 0xFFFF * scale + origin[0],
-                p[1] * 0xFFFF * scale + origin[1],
-                p[2] * 0xFFFF * scale + origin[2])
-    on_poly((w(packed[base]), w(packed[base + 1 + vb]), w(packed[base + 1 + vc])))
-    return True
-
-
-def _pquad(packed, base, vb, vc, scale, origin, on_poly):
-    if base + 1 + max(vb, vc) >= len(packed):
-        return False
-
-    def w(p):
-        return (p[0] * 0xFFFF * scale + origin[0],
-                p[1] * 0xFFFF * scale + origin[1],
-                p[2] * 0xFFFF * scale + origin[2])
-    p1, p2, p3 = w(packed[base]), w(packed[base + 1 + vb]), w(packed[base + 1 + vc])
-    p4 = tuple(p1[j] + (p2[j] - p1[j]) + (p3[j] - p1[j]) for j in range(3))
-    on_poly((p1, p2, p3))
-    on_poly((p1, p3, p4))
-    return True
-
-
-def decode_leaf(leafs, index, verts_or_packed, scale, origin, ty, on_poly):
-    """one PRIM_* leaf entry at dword index (float3 verts for types 4/6, packed for 5/7)"""
-    base = index * 4
-    if base + 8 > len(leafs):
-        return
-    dw = struct.unpack_from("<I", leafs, base)[0]
-    count = ((dw >> 12) & 0xF) + 1
-    base_vert = (dw >> 16) << 10
-    for i in range(count):
-        t = struct.unpack_from("<I", leafs, base + 4 + i * 4)[0]
-        if ty in (PRIM_TRI, PRIM_TRI_PACKED):
-            base_vert += t & 0x7FF
-            vb, vc = (t >> 11) & 0x1FF, (t >> 20) & 0x1FF
-            if ty == PRIM_TRI:
-                ok = _tri(verts_or_packed, base_vert, vb, vc, on_poly)
-            else:
-                ok = _ptri(verts_or_packed, base_vert, vb, vc, scale, origin, on_poly)
-        else:
-            base_vert += t & 0x3FF
-            vb, vc = (t >> 10) & 0x1FF, (t >> 19) & 0x1FF
-            if ty == PRIM_QUAD:
-                ok = _quad(verts_or_packed, base_vert, vb, vc, on_poly)
-            else:
-                ok = _pquad(verts_or_packed, base_vert, vb, vc, scale, origin, on_poly)
-        if not ok:
-            return
-
-
-def decode_type8(leafs, index, on_poly):
-    base = index * 4
-    if base + 32 > len(leafs):
-        return
-    vc, fc, tc, qc, ox, oy, oz, scale = struct.unpack_from("<4B4f", leafs, base)
-    origin = (ox, oy, oz)
-    packed = [struct.unpack_from("<3H", leafs, base + 32 + i * 6) for i in range(vc)]
-    p = index + (32 + 6 * vc + 3 * fc + 3) // 4
-    for _ in range(tc):
-        decode_leaf(leafs, p, packed, scale, origin, PRIM_TRI_PACKED, on_poly)
-        p += 1 + (((struct.unpack_from("<I", leafs, p * 4)[0]) >> 12) & 0xF) + 1
-    for _ in range(qc):
-        decode_leaf(leafs, p, packed, scale, origin, PRIM_QUAD_PACKED, on_poly)
-        p += 1 + (((struct.unpack_from("<I", leafs, p * 4)[0]) >> 12) & 0xF) + 1
-
-
-def load_vertices(lumps, bsp):
-    raw = read_lump(lumps, bsp, LUMP_VERTEXES)
-    n = len(raw) // 4
-    return struct.unpack_from(f"<{n}f", raw, 0)
-
-
-def load_packed(lumps, bsp):
-    if not os.path.exists(lump_path(lumps, bsp, LUMP_PACKED_VERTICES)):
-        return []
-    raw = read_lump(lumps, bsp, LUMP_PACKED_VERTICES)
-    return [struct.unpack_from("<3H", raw, i * 6) for i in range(len(raw) // 6)]
-
-
-def decode_at(ty, leafs, index, verts, packed, scale, origin, on_poly):
-    if ty == PRIM_TRI or ty == PRIM_QUAD:
-        decode_leaf(leafs, index, verts, scale, origin, ty, on_poly)
-    elif ty == PRIM_TRI_PACKED or ty == PRIM_QUAD_PACKED:
-        decode_leaf(leafs, index, packed, scale, origin, ty, on_poly)
-    elif ty == TYPE8:
-        decode_type8(leafs, index, on_poly)
-
-
-def walk(nodes, leafs, verts, packed, origin, qscale, spheres, on_poly=None, prune=False,
-         inflate=None, stats=None):
-    """walk the worldspawn BVH; optionally clear outside child slots. returns (pruned, nodes_seen)"""
+def walk(nodes, world, origin, qscale, spheres, on_poly=None, prune=False, inflate=None, stats=None):
+    """walk the worldspawn BVH; optionally clear outside child slots. returns (pruned, nodes_seen).
+    nodes is the (possibly cropped) node lump; leaf triangles are decoded by bvh_decode.World,
+    the same way the engine does (packed verts, hulls, heightfield patches included)."""
     if stats is None:
         stats = {}
     eps = qscale if inflate is None else inflate
     seen = set()
     stack = [0]
     pruned = 0
+
+    def emit(tri, is_hole):
+        if not is_hole:
+            on_poly(tri)
+
     while stack:
         k = stack.pop()
         if k in seen or k * 64 + 64 > len(nodes):
@@ -225,8 +106,8 @@ def walk(nodes, leafs, verts, packed, origin, qscale, spheres, on_poly=None, pru
             lo = [v - eps for v in lo]
             hi = [v + eps for v in hi]
             if not any(aabb_hits_sphere(lo, hi, s[0], s[1]) for s in spheres):
-                # any child type with a stored AABB can be dropped; unknown types (10, ...) keep
-                # their payload, they simply stop being reachable
+                # any child type with a stored AABB can be dropped; the payload stays in the lumps,
+                # it simply stops being reachable from the root
                 if prune:
                     clear_child_type(nodes, off, c)
                 pruned += 1
@@ -235,22 +116,8 @@ def walk(nodes, leafs, verts, packed, origin, qscale, spheres, on_poly=None, pru
             stats["kept_" + str(t)] = stats.get("kept_" + str(t), 0) + 1
             if t == 0:
                 stack.append(idx[c])
-            elif t == BUNDLE:
-                ix = idx[c]
-                if ix * 4 + 4 > len(leafs):
-                    continue
-                cnt = struct.unpack_from("<I", leafs, ix * 4)[0]
-                o = 1 + cnt
-                for s in range(cnt):
-                    so = (ix + 1 + s) * 4
-                    if so + 4 > len(leafs):
-                        break
-                    _cm, pt, ln = struct.unpack_from("<BBH", leafs, so)
-                    if on_poly:
-                        decode_at(pt, leafs, ix + o, verts, packed, qscale, origin, on_poly)
-                    o += ln
-            elif t in PRIM_TYPES and on_poly:
-                decode_at(t, leafs, idx[c], verts, packed, qscale, origin, on_poly)
+            elif on_poly and t != STATIC_PROP:
+                world.decode_child(0, t, idx[c], emit)
     return pruned, len(seen)
 
 
@@ -352,11 +219,10 @@ def main():
     origin, decode_scale = worldspawn(lumps, args.bsp)
     qscale = decode_scale * 65536.0
     nodes = bytearray(read_lump(lumps, args.bsp, LUMP_BVH_NODES))
-    leafs = read_lump(lumps, args.bsp, LUMP_BVH_LEAF_DATA)
-    verts = load_vertices(lumps, args.bsp)
-    packed = load_packed(lumps, args.bsp)
+    world = bd.World(lumps, args.bsp)
     print(f"worldspawn origin {origin}, decodeScale {decode_scale:g} (bounds step {qscale:g}); "
-          f"{len(nodes)//64} nodes, {len(verts)//3} float verts, {len(packed)} packed verts")
+          f"{len(nodes)//64} nodes, {len(world.fverts)//3} float verts, {len(world.pverts)//3} packed verts, "
+          f"{len(world.heightfields)} heightfields")
 
     stats = {"tris": 0, "tris_in": 0}
 
@@ -367,14 +233,14 @@ def main():
         if any(aabb_hits_sphere(lo, hi, s[0], s[1]) for s in spheres):
             stats["tris_in"] += 1
 
-    walk(nodes, leafs, verts, packed, origin, qscale, spheres, on_poly=count_poly)
+    walk(nodes, world, origin, qscale, spheres, on_poly=count_poly)
     print(f"triangles with AABB intersecting a sphere: {stats['tris_in']} / {stats['tris']}")
-    pruned, seen = walk(nodes, leafs, verts, packed, origin, qscale, spheres, stats={})
+    pruned, seen = walk(nodes, world, origin, qscale, spheres, stats={})
     print(f"nodes seen {seen}, child slots that a prune would drop {pruned}")
     if args.stats_only:
         return
 
-    pruned, _ = walk(nodes, leafs, verts, packed, origin, qscale, spheres, prune=True, stats={})
+    pruned, _ = walk(nodes, world, origin, qscale, spheres, prune=True, stats={})
     if len(nodes) % 64:
         raise SystemExit("node lump size not a multiple of 64")
     # keep the uncropped node lump once, so a different sphere set can be re-applied
@@ -400,7 +266,7 @@ def main():
         if any(aabb_hits_sphere(lo, hi, s[0], s[1]) for s in spheres):
             after["tris_in"] += 1
 
-    walk(nodes, leafs, verts, packed, origin, qscale, spheres, on_poly=after_poly)
+    walk(nodes, world, origin, qscale, spheres, on_poly=after_poly)
     print(f"pruned {pruned} node child slots; triangles after crop: {after['tris']} "
           f"({after['tris_in']} intersect a sphere, {after['tris'] - after['tris_in']} overshoot)")
 

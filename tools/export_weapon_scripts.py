@@ -40,8 +40,8 @@ WELL_KNOWN = {
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rsx", default=r"D:\code\rsx\bin\Release_NoGui\rsx.exe")
-    ap.add_argument("--paks", default=r"D:\Apex\paks\Win64")
+    ap.add_argument("--rsx", default=os.path.join(ROOT, "bin", "Release_NoGui", "rsx.exe"))
+    ap.add_argument("--paks", default=os.environ.get("APEX_PAKS", r"D:\Apex\paks\Win64"))
     ap.add_argument("--out", help=r"default weapon_scripts")
     ap.add_argument("--pak", default="common", help="pak stem that holds the WEPN assets (default common)")
     ap.add_argument("--dry-run", action="store_true", help="only print the rsx command")

@@ -31,6 +31,9 @@ import place_prop_collision as ppc  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NEEDED_LUMPS = (ppc.LUMP_MODELS, ppc.LUMP_CONTENTS_MASKS, ppc.LUMP_BVH_NODES, ppc.LUMP_BVH_LEAF_DATA, ppc.LUMP_GAME_LUMP)
+# also read by the engine's collision loader when present: 0003 float verts, 0014 packed verts,
+# 0011 surface props, 000F surface names, 0015/0016 heightfields (terrain)
+COLLISION_LUMPS = (0x03, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16)
 
 
 def find_pak(paks, stem):
@@ -64,8 +67,8 @@ def check_lumps(lumps, bsp):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--map", required=True, help="map stem, e.g. mp_rr_canyonlands_staging_mu1")
-    ap.add_argument("--rsx", default=r"D:\code\rsx\bin\Release_NoGui\rsx.exe")
-    ap.add_argument("--paks", default=r"D:\Apex\paks\Win64")
+    ap.add_argument("--rsx", default=os.path.join(ROOT, "bin", "Release_NoGui", "rsx.exe"))
+    ap.add_argument("--paks", default=os.environ.get("APEX_PAKS", r"D:\Apex\paks\Win64"))
     ap.add_argument("--out", help=r"default collision_maps\<map>")
     ap.add_argument("--work", help=r"default exported_props_physics\<map>")
     ap.add_argument("--client-paks", help="comma list, default <map>_client_perm,<map>_client_temp")
@@ -197,7 +200,7 @@ def main():
         shutil.rmtree(props_out)
     subprocess.run([sys.executable, "-I", os.path.join(ROOT, "tools", "place_prop_collision.py"),
                     "--lumps", lumps, "--props", work, "--map", bsp,
-                    "--out", os.path.join(out, "props_world"), "--deliver", props_out], check=True)
+                    "--out", os.path.join(out, "props_world"), "--deliver", props_out, "--terrain-stl"], check=True)
 
     # 7. map_info.txt: the numbers navdemo needs to decode the world BVH and place the minimap.
     #    The overview pos_x / pos_y / scale are copied from resource/overviews/<map>.txt when present.
@@ -209,12 +212,21 @@ def main():
                 parts = line.split()
                 if len(parts) == 2 and parts[0] in ("pos_x", "pos_y", "scale"):
                     ov_vals[parts[0]] = parts[1]
+    md = ppc.read_lump(lumps, bsp, ppc.LUMP_MODELS)
+    present = [f"{i:04X}" for i in COLLISION_LUMPS
+               if os.path.exists(os.path.join(lumps, f"{bsp}.bsp.{i:04X}.client.bsp_lump"))]
+    hf_path = os.path.join(lumps, f"{bsp}.bsp.0015.client.bsp_lump")
     info = [
         f"bsp {bsp}",
         f"sprp_version {sprp_ver}",
         f"worldspawn_origin {origin[0]} {origin[1]} {origin[2]}",
         f"worldspawn_decode_scale {qscale / 65536.0!r}",
         f"node_bounds_step {qscale:g}",
+        # bit 0: worldspawn verts are the packed int16 array (0014) instead of float3 (0003), from vertIndex
+        f"worldspawn_vert_index {struct.unpack_from('<I', md, 40)[0]}",
+        f"worldspawn_bvh_flags {struct.unpack_from('<I', md, 44)[0]}",
+        f"heightfields {os.path.getsize(hf_path) // 40 if os.path.exists(hf_path) else 0}",
+        f"collision_lumps {' '.join(present)}",
     ]
     info += [f"overview_{k} {ov_vals[k]}" for k in ("pos_x", "pos_y", "scale") if k in ov_vals]
     info_path = os.path.join(out, "map_info.txt")

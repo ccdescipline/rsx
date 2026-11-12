@@ -8,9 +8,14 @@ Inputs
   --out     output dir
 
 Which props: the ones the world collision BVH references (child type 9 = static prop).
-Leaf data is one dword: low 31 bits = sprp index (needs more than 16 bits on big maps: mp_rr_olympus_mu3
-has 466k props), bit 31 set (solid==7 props) = the prop always uses collision detail 1. Player movement: bit 31 -> detail 1, else detail 0 (engine rule, confirmed
-by the navdemo side); a model without a detail 0 part has no movement collision.
+Leaf data is one dword (engine StaticProp_Trace, v3.0.1.30): bits 0-23 = sprp index (needs more than
+16 bits on big maps: mp_rr_olympus_mu3 has 466k props), bits 24-31 are copied into the trace result,
+bit 31 set (solid==7 props) = the prop always uses collision detail 1.
+Detail level (engine StaticProp_TraceDetailLevel): bit 31 or perTriangleCollisionForced -> 1;
+query flag LOW (1) or perTriangleCollision 0 -> 0; flag HIGH (2) -> 1; flag HIGH_AT_START (4) -> 1 only
+while the query starts inside the prop's bounds. has_stl/tris below use the low-detail rule
+(bit 31 -> detail 1, else detail 0) that player movement uses on the navdemo side;
+a model without a detail 0 part then has no movement collision.
 rsx writes detail 0 as <name>.stl and detail 1 as <name>_d1.stl when it is a different part
 (no _d1 file = same mesh as detail 0, no <name>.stl = model has no detail 0).
 Node bounds are int16, per axis min[4] then max[4], world = worldspawn bvh origin + q * decodeScale * 65536
@@ -41,8 +46,10 @@ CHILD_NODE = 0
 CHILD_BUNDLE = 3
 CHILD_STATIC_PROP = 9
 SPRP_ID = 0x73707270  # 'prps' on disk
+CHILD_HEIGHTFIELD = 10  # terrain patch, data in lumps 0x15 (heightfields) / 0x16 (heights)
 LEAF_DETAIL1 = 0x80000000
-PROP_INDEX_MASK = 0x7FFFFFFF
+PROP_INDEX_MASK = 0x00FFFFFF  # engine: dword & 0xFFFFFF
+LEAF_OPTS_MASK = 0x7F000000   # copied into the trace result by the engine, not part of the index
 
 
 def read_lump(d, m, i):
@@ -75,8 +82,10 @@ def parse_sprp(gl):
     return ids[0][2], props
 
 
-def bvh_prop_refs(nodes, leafs, masks):
-    """yield (prop index, raw dword, contents mask, node bounds or None)"""
+def bvh_prop_refs(nodes, leafs, masks, stats=None):
+    """yield (prop index, raw dword, contents mask, node bounds or None); counts other leaf types in stats"""
+    if stats is None:
+        stats = collections.Counter()
     def u32(i):
         return struct.unpack_from("<I", leafs, i * 4)[0]
 
@@ -110,7 +119,11 @@ def bvh_prop_refs(nodes, leafs, masks):
                     if pt == CHILD_STATIC_PROP:
                         dw = u32(ix + o)
                         yield dw & PROP_INDEX_MASK, dw, masks[scm], None
+                    else:
+                        stats[pt] += 1
                     o += ln
+            else:
+                stats[ty[c]] += 1
 
 
 def load_map(lumps, m):
@@ -125,8 +138,10 @@ def load_map(lumps, m):
     masks_raw = read_lump(lumps, m, LUMP_CONTENTS_MASKS)
     masks = struct.unpack_from(f"<{len(masks_raw) // 4}I", masks_raw)
     refs = {}
+    load_map.leaf_types = collections.Counter()
     for pi, dw, cm, bounds in bvh_prop_refs(read_lump(lumps, m, LUMP_BVH_NODES),
-                                            read_lump(lumps, m, LUMP_BVH_LEAF_DATA), masks):
+                                            read_lump(lumps, m, LUMP_BVH_LEAF_DATA), masks,
+                                            load_map.leaf_types):
         if pi >= len(props):
             raise SystemExit(f"bvh prop index {pi} >= sprp count {len(props)}")
         r = refs.setdefault(pi, {"dword": dw, "contents": cm, "bounds": None})
@@ -181,6 +196,36 @@ def missing_models(props_dir, props, refs):
     return sorted(out.values())
 
 
+def write_terrain_stl(lumps, m, path):
+    """heightfield terrain of worldspawn as one STL; returns the triangle count (0: none, no file)"""
+    import sys
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:  # python -I leaves the script directory off sys.path
+        sys.path.insert(0, here)
+    import bvh_decode as bd
+    world = bd.World(lumps, m)
+    tris, holes = [], [0]
+
+    def on_tri(tri, is_hole):
+        if is_hole:
+            holes[0] += 1
+        else:
+            tris.append(tri)
+
+    def on_child(_ax, _c, ty, idx, _cm):
+        if ty in (bd.HEIGHTFIELD, bd.BUNDLE):  # patches can also sit inside a bundle
+            world.decode_child(0, ty, idx, on_tri, only={bd.HEIGHTFIELD})
+
+    world.walk(0, on_child)
+    if tris:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        bd.write_stl(path, tris)
+        print(f"terrain: {len(world.heightfields)} heightfields, {len(tris)} triangles ({holes[0]} hole triangles left out) -> {path}")
+    else:
+        print(f"terrain: no heightfield patches in the worldspawn BVH ({len(world.heightfields)} heightfields in 0015)")
+    return len(tris)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lumps", required=True)
@@ -190,10 +235,15 @@ def main():
     ap.add_argument("--world-stl", action="store_true", help="also write all placed movement collision as one world-space STL (large)")
     ap.add_argument("--obj", action="store_true", help="also write a merged OBJ (large)")
     ap.add_argument("--deliver", help="copy <name>.stl / <name>_d1.stl of every BVH-referenced model into this dir")
+    ap.add_argument("--terrain-stl", action="store_true",
+                    help="write the worldspawn heightfield patches (child type 10, lumps 0015/0016) as "
+                         "<map>_terrain_collision.stl, world space, holes left out")
     args = ap.parse_args()
 
     m = args.map
     sprp_ver, props, refs, origin, qscale = load_map(args.lumps, m)
+    if args.terrain_stl:
+        write_terrain_stl(args.lumps, m, os.path.join(args.out, f"{m}_terrain_collision.stl"))
 
     os.makedirs(args.out, exist_ok=True)
     obj_path = os.path.join(args.out, f"{m}_props_collision.obj")
@@ -306,6 +356,13 @@ def main():
     placed = sum(1 for r in rows if r["tris"])
     print(f"sprp v{sprp_ver}: {len(props)} instances, {len(set(p['model'] for p in props))} models, bvh origin {origin}, node bounds scale {qscale:g}")
     print(f"BVH static prop refs: {len(refs)} (bit 31 / detail 1: {sum(1 for r in refs.values() if r['dword'] & LEAF_DETAIL1)})")
+    opts = sum(1 for r in refs.values() if r["dword"] & LEAF_OPTS_MASK)
+    if opts:
+        print(f"  {opts} prop refs have bits 24-30 set (not part of the index, the engine copies them to the trace result)")
+    hf = load_map.leaf_types.get(CHILD_HEIGHTFIELD, 0)
+    if hf:
+        print(f"WARNING: {hf} heightfield leaves (child type 10) in the world BVH: that terrain collision lives in "
+              f"lumps 0015/0016, it is not in the prop STLs and navdemo has to decode it")
     print(f"movement collision: {placed} instances, {total_tris} triangles, {len(used)} STLs; "
           f"{sum(no_d0.values())} instances of {len(no_d0)} models without a detail 0 part (no movement collision)")
     for k, e in sorted(errs.items()):

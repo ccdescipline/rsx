@@ -14,8 +14,10 @@ from pathlib import Path
 # Default export root: this project (tools/..), so `python tools/export_game_scripts.py`
 # writes exported/ next to docs/ and the pak tools.
 WORKSPACE = Path(__file__).resolve().parent.parent
-DEFAULT_RSX = Path(r"D:\code\rsx\bin\Release_NoGui\rsx.exe")
-DEFAULT_PAKS = Path(r"D:\Apex\paks\Win64")
+# rsx built from this checkout (D:\code\rsx\bin\Release_NoGui\rsx.exe on the export machine);
+# paks default to D:\Apex\paks\Win64, override with the APEX_PAKS environment variable or --paks.
+DEFAULT_RSX = WORKSPACE / "bin" / "Release_NoGui" / "rsx.exe"
+DEFAULT_PAKS = Path(os.environ.get("APEX_PAKS", r"D:\Apex\paks\Win64"))
 
 TRAILING_COMMA = re.compile(r",\s*([}\]])")
 
